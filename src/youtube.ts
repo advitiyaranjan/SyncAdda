@@ -14,6 +14,7 @@ type YTPlayer = {
   setPlaybackRate(rate: number): void;
   setVolume(volume: number): void;
   unloadModule(name: string): void;
+  getAvailableQualityLevels?(): string[];
   mute(): void;
   unMute(): void;
   destroy(): void;
@@ -44,6 +45,17 @@ declare global {
 }
 
 export const YT_STATE = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 };
+
+// YouTube ignores requests for a quality; it picks one to suit the height of its picture in
+// device pixels. So for a chosen quality the picture is drawn at the height below and scaled to
+// fit the player. It won't go under 480p this way, so lower qualities aren't offered.
+const QUALITY_HEIGHT: Record<string, number> = {
+  hd2160: 2160,
+  hd1440: 1440,
+  hd1080: 1080,
+  hd720: 720,
+  large: 360,
+};
 
 const hosts = /^(?:www\.|m\.|music\.)?(?:youtube\.com|youtube-nocookie\.com|youtu\.be)$/i;
 export function youtubeId(url: string): string | null {
@@ -121,7 +133,17 @@ export async function createYouTubeEngine(
   if (signal?.aborted) throw new DOMException('Player was removed.', 'AbortError');
   // YouTube replaces the element it is given, so hand it a child React doesn't own.
   const mount = document.createElement('div');
-  host.replaceChildren(mount);
+  const frame = document.createElement('div');
+  frame.className = 'youtube-frame';
+  frame.append(mount);
+  // Shows only the picture. YouTube's frame is taller than it, above and below, and that is
+  // where YouTube draws its title, links, and logo whenever the video starts: out of sight.
+  const clip = document.createElement('div');
+  clip.className = 'youtube-clip';
+  clip.append(frame);
+  host.replaceChildren(clip);
+  // Width over height of the picture; YouTube only tells us through its link preview.
+  let aspect = 16 / 9;
   let ready = false;
   // Where a cued (not yet started) video will begin; getCurrentTime() is unreliable until then.
   let cuedAt: number | null = 0;
@@ -130,7 +152,40 @@ export async function createYouTubeEngine(
   let autoplayBlocked = false;
   // The room's speed. YouTube resets to 1x whenever it (re)loads the video, so it's re-applied.
   let desiredRate = 1;
-  let captionsOff = false;
+  // This viewer's quality; 'auto' leaves the frame at the player's own size.
+  let desiredQuality = 'auto';
+  let qualityTimer: number | undefined;
+  const fit = () => {
+    if (!host.clientWidth || !host.clientHeight) return;
+    // The picture, as large as fits in the player.
+    const height = Math.min(host.clientHeight, host.clientWidth / aspect),
+      width = height * aspect;
+    clip.style.width = `${width}px`;
+    clip.style.height = `${height}px`;
+    clip.style.left = `${(host.clientWidth - width) / 2}px`;
+    clip.style.top = `${(host.clientHeight - height) / 2}px`;
+    const target = QUALITY_HEIGHT[desiredQuality];
+    const scale = target ? target / (height * devicePixelRatio) : 1;
+    // Room above and below the picture for YouTube's own things, at the size it draws them.
+    const margin = Math.max(110, height * scale * 0.2);
+    frame.style.width = `${width * scale}px`;
+    frame.style.height = `${height * scale + 2 * margin}px`;
+    frame.style.transform = `scale(${1 / scale}) translateY(${-margin}px)`;
+  };
+  const resized = new ResizeObserver(fit);
+  resized.observe(host);
+  fetch(
+    `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}`,
+    { signal },
+  )
+    .then((response) => response.json())
+    .then(({ width, height }: { width?: number; height?: number }) => {
+      if (!(width! > 0 && height! > 0)) return;
+      // The preview rounds to whole pixels (200 x 113 for 16:9).
+      aspect = Math.abs(width! / height! - 16 / 9) < 0.02 ? 16 / 9 : width! / height!;
+      fit();
+    })
+    .catch(() => {});
   const keepRate = () => {
     if (player.getPlaybackRate() !== desiredRate) player.setPlaybackRate(desiredRate);
   };
@@ -153,10 +208,10 @@ export async function createYouTubeEngine(
     width: '100%',
     height: '100%',
     playerVars: {
-      // YouTube's own controls (captions, quality, settings) are shown; Player shares the owner's
-      // play, pause, and seek from them with everyone.
-      controls: 1,
-      cc_load_policy: 0,
+      // None of YouTube's own controls: Player's controls drive it, for everyone.
+      controls: 0,
+      disablekb: 1,
+      fs: 0,
       iv_load_policy: 3,
       playsinline: 1,
       rel: 0,
@@ -178,13 +233,10 @@ export async function createYouTubeEngine(
         }
         if (data === YT_STATE.PLAYING) {
           keepRate();
-          // Captions start off (YouTube may turn them on from someone's account settings);
-          // anyone can still switch them on with the CC button.
-          if (!captionsOff) {
-            captionsOff = true;
-            player.unloadModule('captions');
-            player.unloadModule('cc');
-          }
+          // Captions stay off for everyone. YouTube may load them again from someone's account
+          // settings each time the video (re)loads, so they're removed on every start.
+          player.unloadModule('captions');
+          player.unloadModule('cc');
         }
         on.state(data, automatic);
       },
@@ -276,10 +328,25 @@ export async function createYouTubeEngine(
       if (muted) player.mute();
       else player.unMute();
     },
+    qualities: () =>
+      (player.getAvailableQualityLevels?.() ?? []).filter((level) => level in QUALITY_HEIGHT),
+    setQuality(level) {
+      if (level === desiredQuality) return;
+      desiredQuality = level;
+      fit();
+      // What's already buffered is in the old quality; once YouTube has seen its new size, a
+      // seek to the same spot makes it fetch the new one.
+      clearTimeout(qualityTimer);
+      qualityTimer = window.setTimeout(() => {
+        if (state() === YT_STATE.PLAYING) engine.seek(player.getCurrentTime());
+      }, 1000);
+    },
     destroy() {
       pending?.done(false);
+      clearTimeout(qualityTimer);
+      resized.disconnect();
       player.destroy();
-      mount.remove();
+      clip.remove();
     },
   };
   return engine;

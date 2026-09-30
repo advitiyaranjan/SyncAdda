@@ -49,4 +49,7 @@ export type Engine = {
   play(): Promise<void>;
   pause(): void;
   setVolume(volume: number, muted: boolean): void;
+  // Picture qualities this viewer can pick from besides 'auto' (YouTube only), best first.
+  qualities?(): string[];
+  setQuality?(level: string): void;
 };

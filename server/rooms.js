@@ -40,18 +40,19 @@ export const deniedMessage = (need) =>
 // latest ones, and joining sends the whole history.
 export const MAX_MESSAGES = 5000;
 export const STATE_MESSAGES = 100;
-// A room closes after this long with nothing playing, nobody in a call, and no activity.
-export const IDLE_MS = 30 * 60_000;
-export const IDLE_MESSAGE = 'This room closed after 30 minutes without activity.';
-export const ALONE_MESSAGE = 'Everyone else left, so this room has closed.';
-export const isIdle = (room, people, idleMs = IDLE_MS, now = Date.now()) =>
-  !room.playback.playing &&
-  !people.some((p) => p.inCall && p.online) &&
-  now - (room.lastActivity ?? now) >= idleMs;
+// A room is never closed while anyone is in it. Once everyone has gone it closes, unless
+// something is still playing: then it is kept this long, so people whose connections dropped
+// (locked phones, say) find it again.
+export const EMPTY_MS = 6 * 3600_000;
+export const isAbandoned = (room, people, emptyMs = EMPTY_MS, now = Date.now()) =>
+  !people.length && (!room.playback.playing || now - (room.lastActivity ?? now) >= emptyMs);
 export const positionAt = (playback, now = Date.now()) =>
   playback.position +
   (playback.playing ? (Math.max(0, now - playback.updatedAt) / 1000) * playback.rate : 0);
-export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs = IDLE_MS } = {}) {
+export function attachRooms(
+  io,
+  { graceMs = 90_000, callGraceMs = 15_000, emptyMs = EMPTY_MS } = {},
+) {
   const rooms = new Map();
   const timers = new Set();
   const creationLimits = new Map();
@@ -66,6 +67,10 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs
   const broadcast = (room) => {
     room.lastActivity = Date.now();
     io.to(room.code).emit('room:state', snapshot(room));
+  };
+  const discard = (room) => {
+    rooms.delete(room.code);
+    void deleteUploads(droppedUploads(room.playlist, []));
   };
   const endRoom = (room, message) => {
     io.to(room.code).emit('room:ended', { message });
@@ -85,7 +90,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs
     room.messages.push({ id: randomUUID(), name: 'SyncAdda', text, at: Date.now(), system: true });
     room.messages = room.messages.slice(-MAX_MESSAGES);
   };
-  const remove = (room, id, { kicked = false } = {}) => {
+  const remove = (room, id) => {
     const person = room.people.get(id);
     if (!person) return;
     clearTimeout(person.timer);
@@ -94,11 +99,10 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs
     room.queueAccess = room.queueAccess.filter((p) => p !== id);
     system(room, `${person.name} left the room.`);
     if (!room.people.size) {
-      rooms.delete(room.code);
-      void deleteUploads(droppedUploads(room.playlist, []));
+      room.lastActivity = Date.now();
+      if (isAbandoned(room, [], emptyMs)) discard(room);
       return;
     }
-    if (!kicked && room.hadCompany && room.people.size < 2) return endRoom(room, ALONE_MESSAGE);
     if (room.hostId === id) {
       room.hostId = (
         [...room.people.values()].find((p) => p.online) || [...room.people.values()][0]
@@ -153,9 +157,12 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs
       )
         throw new Error('This session could not be restored. Please open a new tab.');
       if (room.banned.has(user.id)) throw new Error('You were removed from this room.');
-      if (room.locked && !existing)
+      // Everyone had left a room that was still playing: whoever returns first hosts it.
+      const empty = !room.people.size;
+      if (room.locked && !existing && !empty)
         throw new Error('This room is locked. Ask the host to unlock it.');
       if (room.people.size >= 8 && !existing) throw new Error('This room is full (8 people).');
+      if (empty) room.hostId = user.id;
       if (existing) {
         clearTimeout(existing.timer);
         timers.delete(existing.timer);
@@ -180,7 +187,6 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs
       await socket.join(room.code);
       if (!existing) system(room, `${user.name} joined. Make yourself at home!`);
       broadcast(room);
-      if (room.people.size >= 2) room.hadCompany = true;
       return { room: snapshot(room, true) };
     };
     event('room:create', async (data) => {
@@ -277,7 +283,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs
         target.data = {};
         target.emit('room:ended', { message: 'The host removed you from this room.' });
       }
-      remove(room, data.id, { kicked: true });
+      remove(room, data.id);
     });
     event('room:close', () => {
       endRoom(current('host'), 'The host ended this watch party. See you next time!');
@@ -415,19 +421,19 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs
       if (Date.now() - value.at > 60_000) creationLimits.delete(key);
   }, 60_000);
   cleanup.unref();
-  const idleSweep = setInterval(
+  const emptySweep = setInterval(
     () => {
       for (const room of rooms.values())
-        if (isIdle(room, [...room.people.values()], idleMs)) endRoom(room, IDLE_MESSAGE);
+        if (isAbandoned(room, [...room.people.values()], emptyMs)) discard(room);
     },
-    Math.min(60_000, idleMs / 2),
+    Math.min(60_000, emptyMs / 2),
   );
-  idleSweep.unref();
+  emptySweep.unref();
   return {
     rooms,
     dispose() {
       clearInterval(cleanup);
-      clearInterval(idleSweep);
+      clearInterval(emptySweep);
       for (const t of timers) clearTimeout(t);
       timers.clear();
     },

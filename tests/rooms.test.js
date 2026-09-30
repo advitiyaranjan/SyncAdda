@@ -228,26 +228,41 @@ test('call signaling requires shared room membership and call participation', as
   await emit(guestClient.socket, 'call:status', { inCall: false, mic: true, camera: true });
   assert.equal(service.rooms.get(room.code).people.get(guestClient.identity.id).mic, false);
 });
-test('leaving transfers hosting, and the room closes when only one person is left', async () => {
+test('leaving transfers hosting, and the room stays open while anyone is in it', async () => {
   const { host, room } = await setup();
   const first = await guest(room);
   const second = await guest(room, 'Maya');
   await emit(host, 'room:leave');
   assert.equal(service.rooms.get(room.code).hostId, first.identity.id);
-  const ended = nextEvent(second.socket, 'room:ended');
+  let ended = false;
+  second.socket.on('room:ended', () => (ended = true));
   await emit(first.socket, 'room:leave');
-  assert.match((await ended).message, /Everyone else left/);
+  await wait(50);
+  assert.equal(ended, false);
+  assert.equal(service.rooms.get(room.code).hostId, second.identity.id);
+  assert.equal((await emit(second.socket, 'chat:send', { text: 'Still here' })).ok, true);
+  // The last person leaving with nothing playing closes it.
+  await emit(second.socket, 'room:leave');
   assert.equal(service.rooms.has(room.code), false);
 });
-test('someone waiting alone keeps their room; it closes once company leaves', async () => {
+test('a room everyone dropped out of is kept while something is playing', async () => {
   const { host, room } = await setup();
-  await wait(50);
-  assert.equal(service.rooms.has(room.code), true);
   const { socket } = await guest(room);
-  const ended = nextEvent(host, 'room:ended');
-  await emit(socket, 'room:leave');
-  assert.match((await ended).message, /Everyone else left/);
-  assert.equal(service.rooms.has(room.code), false);
+  await emit(host, 'room:settings', { locked: true });
+  await emit(host, 'media:add', movie);
+  const mediaId = service.rooms.get(room.code).currentId;
+  await emit(host, 'playback:update', { mediaId, playing: true, position: 30 });
+  host.disconnect();
+  socket.disconnect();
+  // Both seats lapse (120 ms here), but the room is still there.
+  await wait(250);
+  assert.equal(service.rooms.get(room.code).people.size, 0);
+  // Whoever comes back first gets in, lock or not, and hosts it.
+  const back = await guest(room, 'Rahul again');
+  assert.equal(back.room.hostId, back.identity.id);
+  assert.equal(back.room.playback.playing, true);
+  assert.equal(back.room.playlist.length, 1);
+  assert.equal((await emit(back.socket, 'playback:update', { mediaId, playing: false })).ok, true);
 });
 test('a dropped connection keeps its seat temporarily, then expires and transfers host', async () => {
   const { host, room, identity } = await setup();
@@ -269,12 +284,12 @@ test('the whole chat is kept and sent to people who join later', async () => {
   assert.equal(chat.length, 130);
   assert.equal(chat[0].text, 'Message 0');
 });
-test('a room closes after a stretch without activity', async () => {
-  const idleHttp = createServer(),
-    idleIo = new Server(idleHttp),
-    idleService = attachRooms(idleIo, { idleMs: 150 });
-  await new Promise((resolve) => idleHttp.listen(0, '127.0.0.1', resolve));
-  const socket = connect(`http://127.0.0.1:${idleHttp.address().port}`, {
+test('a quiet room stays open for the person in it; an empty one left playing expires', async () => {
+  const quietHttp = createServer(),
+    quietIo = new Server(quietHttp),
+    quietService = attachRooms(quietIo, { emptyMs: 150 });
+  await new Promise((resolve) => quietHttp.listen(0, '127.0.0.1', resolve));
+  const socket = connect(`http://127.0.0.1:${quietHttp.address().port}`, {
     transports: ['websocket'],
     forceNew: true,
     reconnection: false,
@@ -282,12 +297,22 @@ test('a room closes after a stretch without activity', async () => {
   try {
     await nextEvent(socket, 'connect');
     const { room } = await emit(socket, 'room:create', { identity: user('Asha'), name: 'Quiet' });
-    assert.match((await nextEvent(socket, 'room:ended')).message, /without activity/);
-    assert.equal(idleService.rooms.has(room.code), false);
+    let ended = false;
+    socket.on('room:ended', () => (ended = true));
+    await wait(400);
+    assert.equal(ended, false);
+    assert.equal(quietService.rooms.has(room.code), true);
+    await emit(socket, 'media:add', movie);
+    const mediaId = quietService.rooms.get(room.code).currentId;
+    await emit(socket, 'playback:update', { mediaId, playing: true });
+    await emit(socket, 'room:leave');
+    assert.equal(quietService.rooms.has(room.code), true);
+    await wait(400);
+    assert.equal(quietService.rooms.has(room.code), false);
   } finally {
     socket.disconnect();
-    idleService.dispose();
-    await new Promise((resolve) => idleIo.close(resolve));
+    quietService.dispose();
+    await new Promise((resolve) => quietIo.close(resolve));
   }
 });
 test('closing a room clears its state and notifies participants', async () => {

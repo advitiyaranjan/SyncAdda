@@ -46,6 +46,15 @@ const videoEngine = (el: HTMLVideoElement): Engine => ({
   },
 });
 
+// YouTube's names for the picture qualities a viewer can pick.
+const QUALITY_LABELS: Record<string, string> = {
+  hd2160: '2160p',
+  hd1440: '1440p',
+  hd1080: '1080p',
+  hd720: '720p',
+  large: '480p',
+};
+
 export default function Player({
   room,
   canControl,
@@ -90,6 +99,11 @@ export default function Player({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [playback, setPlayback] = useState(room.playback);
+  // Picture quality is each viewer's own choice (it depends on their connection), not shared.
+  const [quality, setQuality] = useState('auto');
+  const [qualities, setQualities] = useState<string[]>([]);
+  const qualityRef = useRef(quality);
+  qualityRef.current = quality;
   const media = room.playlist.find((m) => m.id === room.currentId);
   const videoId = media ? youtubeId(media.url) : null;
   const mediaIdRef = useRef(room.currentId);
@@ -100,8 +114,9 @@ export default function Player({
   endedRef.current = () => {
     if (isHost && canControl) void next();
   };
-  // YouTube's own controls only act on this viewer's player: share the owner's play, pause, and
-  // seek with everyone, and put anyone else back on the shared position.
+  // YouTube's own controls are off, but its player can still be started or paused on this device
+  // alone (its play button while playback is blocked, a headset or notification button): share
+  // the owner's play, pause, and seek with everyone, and put anyone else back on the shared position.
   const youtubeActionRef = useRef((_state: number) => {});
   youtubeActionRef.current = (value) => {
     const engine = engineRef.current,
@@ -243,6 +258,7 @@ export default function Player({
     setCurrentTime(0);
     setBlocked(false);
     setLoading(!!media);
+    setQualities([]);
     lastSeek.current = 0;
     playAttempt.current = null;
     engineRef.current = null;
@@ -263,6 +279,7 @@ export default function Player({
             if (disposed) return;
             engineRef.current = engine;
             engine.setVolume(volumeRef.current.volume, volumeRef.current.muted);
+            engine.setQuality?.(qualityRef.current);
             setLoading(false);
             apply();
           },
@@ -305,6 +322,9 @@ export default function Player({
         if (!engine) return;
         setCurrentTime(engine.time());
         setDuration(engine.duration());
+        // YouTube only knows the qualities once the video has started loading.
+        const levels = engine.qualities?.() ?? [];
+        setQualities((known) => (known.join() === levels.join() ? known : levels));
       }, 250);
     } else if (
       /\.m3u8(?:\?|$)/i.test(media.url) &&
@@ -493,6 +513,9 @@ export default function Player({
       {isFullscreen && overlay}
       <div className={`player-screen ${audio ? 'audio-screen' : ''}`}>
         <div className="youtube-host" ref={youtubeRef} hidden={!videoId} />
+        {/* Keeps taps off YouTube's own player, so it behaves like the <video> below. While
+            playback is blocked it steps aside: some phones only start after a tap on YouTube. */}
+        {videoId && !blocked && <div className="youtube-shield" onClick={screenClick} />}
         <video
           ref={videoRef}
           hidden={!!videoId}
@@ -690,6 +713,24 @@ export default function Player({
               </option>
             ))}
           </select>
+          {qualities.length > 0 && (
+            <select
+              className="speed-select quality-select"
+              aria-label="Video quality on this device"
+              value={qualities.includes(quality) ? quality : 'auto'}
+              onChange={(e) => {
+                setQuality(e.target.value);
+                engineRef.current?.setQuality?.(e.target.value);
+              }}
+            >
+              <option value="auto">Auto</option>
+              {qualities.map((level) => (
+                <option key={level} value={level}>
+                  {QUALITY_LABELS[level] || level}
+                </option>
+              ))}
+            </select>
+          )}
           <button className="icon-button" aria-label="Fullscreen" onClick={fullscreen}>
             <Maximize2 size={19} />
           </button>

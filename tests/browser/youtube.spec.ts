@@ -49,7 +49,36 @@ test('YouTube links play in sync for everyone', async ({ page, browser }) => {
       })
       .toBe(false);
 
-  // The host pauses by clicking YouTube's own player, as a person would; it reaches everyone.
+  // YouTube's own controls are off.
+  await expect(
+    page.frameLocator('.youtube-host iframe').locator('.ytp-chrome-bottom'),
+  ).toBeHidden();
+  // Its title, links, and logo are drawn above and below the picture, outside what's shown.
+  const shown = (await page.locator('.youtube-clip').boundingBox())!;
+  const frame = (await page.locator('.youtube-host iframe').boundingBox())!;
+  expect(frame.y).toBeLessThanOrEqual(shown.y - 100);
+  expect(frame.y + frame.height).toBeGreaterThanOrEqual(shown.y + shown.height + 100);
+  expect(Math.abs(frame.width - shown.width)).toBeLessThan(1);
+  await page.screenshot({ path: 'test-results/youtube-started.png' });
+  // Quality is picked from our controls, for this device only.
+  const quality = page.getByRole('combobox', { name: 'Video quality on this device' });
+  await expect(quality).toHaveValue('auto');
+  for (const [level, height] of [
+    ['hd1080', 1080],
+    ['large', 480],
+  ] as const) {
+    await quality.selectOption(level);
+    await expect
+      .poll(() => youtubeVideo(page).evaluate((el: HTMLVideoElement) => el.videoHeight), {
+        timeout: 30_000,
+      })
+      .toBe(height);
+  }
+  // Only this device changed.
+  await expect(guest.getByRole('combobox', { name: 'Video quality on this device' })).toHaveValue(
+    'auto',
+  );
+  // The host pauses by clicking the picture, as a person would; it reaches everyone.
   const box = (await page.locator('.youtube-host iframe').boundingBox())!;
   // YouTube can ignore a click in the moment it's starting up, so give it a beat, like a person.
   await page.waitForTimeout(2000);

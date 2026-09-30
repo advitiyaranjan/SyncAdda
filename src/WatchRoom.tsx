@@ -1067,11 +1067,9 @@ export default function WatchRoom({
           subtitle={
             modal === 'close'
               ? 'This closes the room for everyone. The chat and queue will be cleared.'
-              : room.participants.length === 2
-                ? 'Only one person would be left, so this closes the room for them too.'
-                : isHost && online > 1
-                  ? 'Your friends can keep watching. Another participant will become the host.'
-                  : 'You can come back with the same room link while the room is active.'
+              : isHost && online > 1
+                ? 'Your friends can keep watching. Another participant will become the host.'
+                : 'You can come back with the same room link while the room is active.'
           }
           onClose={closeModal}
         >

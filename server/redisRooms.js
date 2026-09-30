@@ -3,13 +3,11 @@ import Redis from 'ioredis';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { z } from 'zod';
 import {
-  ALONE_MESSAGE,
-  IDLE_MESSAGE,
+  EMPTY_MS,
   MAX_MESSAGES,
   STATE_MESSAGES,
   callSchema,
   deniedMessage,
-  isIdle,
   permitted,
   positionAt,
 } from './rooms.js';
@@ -47,7 +45,7 @@ export async function attachRedisRooms(
     redisUrl = process.env.REDIS_URL || process.env.KV_URL,
     graceMs = 90_000,
     callGraceMs = 15_000,
-    idleMs,
+    emptyMs = EMPTY_MS,
     RedisClass = Redis,
   } = {},
 ) {
@@ -82,14 +80,13 @@ export async function attachRedisRooms(
     room.messages.push({ id: randomUUID(), name: 'SyncAdda', text, at: Date.now(), system: true });
     room.messages = room.messages.slice(-MAX_MESSAGES);
   };
-  const remove = (room, id, { kicked = false } = {}) => {
+  const remove = (room, id) => {
     const person = room.people[id];
     if (!person) return;
     delete room.people[id];
     room.queueAccess = (room.queueAccess ?? []).filter((p) => p !== id);
     system(room, `${person.name} left the room.`);
     const left = Object.keys(room.people).length;
-    if (!kicked && room.hadCompany && left > 0 && left < 2) room.closing = ALONE_MESSAGE;
     if (room.hostId === id && left) {
       room.hostId =
         Object.values(room.people).find((p) => p.online)?.id || Object.keys(room.people)[0];
@@ -118,7 +115,6 @@ export async function attachRedisRooms(
     }
     if (!acquired) throw new Error('This room is busy. Please try again.');
     let result,
-      closing,
       dropped = [];
     try {
       const room = await read(code);
@@ -126,17 +122,19 @@ export async function attachRedisRooms(
         throw new Error('That room could not be found. Check the code or create a new one.');
       prune(room);
       const before = [...room.playlist];
-      const idle = isIdle(room, Object.values(room.people), idleMs);
-      if (idle) room.closing = IDLE_MESSAGE;
-      const value = idle ? undefined : await handler(room);
-      room.lastActivity = Date.now();
-      // Closing: everyone is let go and the room (with its uploads) is deleted below.
-      if (room.closing) {
-        closing = room.closing;
-        room.people = {};
-      }
-      const open = Object.keys(room.people).length > 0;
-      if (open) await redis.set(key(code), JSON.stringify(room), 'EX', 6 * 3600);
+      const value = await handler(room);
+      // A room is never closed while anyone is in it. Once everyone has gone it is deleted
+      // (with its uploads), unless something is still playing: then it is kept for a while,
+      // so people whose connections dropped (locked phones, say) find it again.
+      const people = Object.keys(room.people).length;
+      const open = !room.closed && (people > 0 || room.playback.playing);
+      if (open)
+        await redis.set(
+          key(code),
+          JSON.stringify(room),
+          'EX',
+          people ? 6 * 3600 : Math.ceil(emptyMs / 1000),
+        );
       else await redis.del(key(code));
       dropped = droppedUploads(before, open ? room.playlist : []);
       result = { value, room };
@@ -149,11 +147,6 @@ export async function attachRedisRooms(
       );
     }
     await deleteUploads(dropped);
-    if (closing) {
-      io.to(code).emit('room:ended', { message: closing });
-      io.in(code).socketsLeave(code);
-      if (closing === IDLE_MESSAGE) throw new Error(IDLE_MESSAGE);
-    }
     return result;
   }
   io.on('connection', (socket) => {
@@ -195,8 +188,6 @@ export async function attachRedisRooms(
         id = socket.data.personId;
       if (!code || !id) throw new Error('Join a room to continue.');
       const room = await read(code);
-      // Closes a room that has sat idle too long (mutate notices it and throws).
-      if (room && isIdle(room, Object.values(room.people), idleMs)) await mutate(code, () => {});
       if (!room || room.people[id]?.socketId !== socket.id)
         throw new Error('Join a room to continue.');
       if (!permitted(room, id, need)) throw new Error(deniedMessage(need));
@@ -233,7 +224,6 @@ export async function attachRedisRooms(
           locked: false,
           everyoneControls: false,
           queueAccess: [],
-          lastActivity: Date.now(),
           people: {
             [input.identity.id]: {
               ...input.identity,
@@ -276,10 +266,13 @@ export async function attachRedisRooms(
           throw new Error('This session could not be restored. Please open a new tab.');
         if (room.banned.includes(input.identity.id))
           throw new Error('You were removed from this room.');
-        if (room.locked && !existing)
+        // Everyone had left a room that was still playing: whoever returns first hosts it.
+        const empty = !Object.keys(room.people).length;
+        if (room.locked && !existing && !empty)
           throw new Error('This room is locked. Ask the host to unlock it.');
         if (Object.keys(room.people).length >= 8 && !existing)
           throw new Error('This room is full (8 people).');
+        if (empty) room.hostId = input.identity.id;
         const oldId = existing?.socketId;
         room.people[input.identity.id] = {
           ...input.identity,
@@ -288,7 +281,6 @@ export async function attachRedisRooms(
           ...input.call,
         };
         if (!existing) system(room, `${input.identity.name} joined. Make yourself at home!`);
-        if (Object.keys(room.people).length >= 2) room.hadCompany = true;
         return oldId;
       });
       if (oldSocketId && oldSocketId !== socket.id) {
@@ -303,7 +295,7 @@ export async function attachRedisRooms(
       return { room: snapshot(room, true) };
     });
     event('room:leave', async () => {
-      // Leave the broadcast first, so a room closing because of this doesn't notify the leaver.
+      // Leave the broadcast first, so the room's update about this doesn't reach the leaver.
       await socket.leave(socket.data.code);
       const { room } = await change((room) => remove(room, socket.data.personId), {
         broadcastState: false,
@@ -356,7 +348,7 @@ export async function attachRedisRooms(
           const person = room.people[data.id];
           if (!person) throw new Error('That person has already left.');
           room.banned.push(data.id);
-          remove(room, data.id, { kicked: true });
+          remove(room, data.id);
           return person.socketId;
         },
         { need: 'host', broadcastState: false },
@@ -368,7 +360,7 @@ export async function attachRedisRooms(
     event('room:close', async () => {
       const { room } = await change(
         (room) => {
-          room.people = {};
+          room.closed = true;
         },
         { need: 'host', broadcastState: false },
       );

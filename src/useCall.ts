@@ -16,6 +16,51 @@ type Signal = {
   description?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
 };
+// Silence and a black picture, sent while the microphone or camera is off. Every connection then
+// always carries sound and picture, exactly as when both are on: phones are unreliable at
+// starting a track that joins a connection later, and at playing one that has never carried
+// anything.
+type StandIns = { audio?: MediaStreamTrack; video?: MediaStreamTrack; stop(): void };
+function createStandIns(): StandIns {
+  let audio: MediaStreamTrack | undefined,
+    video: MediaStreamTrack | undefined,
+    context: AudioContext | undefined,
+    timer: ReturnType<typeof setInterval> | undefined;
+  try {
+    context = new AudioContext();
+    const output = context.createMediaStreamDestination(),
+      source = context.createOscillator(),
+      gain = context.createGain();
+    gain.gain.value = 0;
+    source.connect(gain).connect(output);
+    source.start();
+    [audio] = output.stream.getAudioTracks();
+  } catch {
+    /* nothing is sent while the microphone is off */
+  }
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 320;
+    canvas.height = 240;
+    const paint = () => canvas.getContext('2d')?.fillRect(0, 0, canvas.width, canvas.height);
+    paint();
+    [video] = canvas.captureStream(2).getVideoTracks();
+    // A canvas only gives out a frame when it's drawn on.
+    timer = setInterval(paint, 1000);
+  } catch {
+    /* nothing is sent while the camera is off */
+  }
+  return {
+    audio,
+    video,
+    stop() {
+      clearInterval(timer);
+      audio?.stop();
+      video?.stop();
+      void context?.close().catch(() => {});
+    },
+  };
+}
 export function useCall(myId: string, people: Person[], notify: (message: string) => void) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [streams, setStreams] = useState<Record<string, MediaStream>>({});
@@ -32,6 +77,27 @@ export function useCall(myId: string, people: Person[], notify: (message: string
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   });
   const generation = useRef(0);
+  const standIns = useRef<StandIns | null>(null);
+  // What we send for sound or picture: our microphone or camera, else its stand-in.
+  const outgoing = useCallback(
+    (kind: string) =>
+      stream.current.getTracks().find((t) => t.kind === kind && t.readyState === 'live') ||
+      standIns.current?.[kind as 'audio' | 'video'] ||
+      null,
+    [],
+  );
+  const send = useCallback(
+    async (kind: 'audio' | 'video') => {
+      const track = outgoing(kind);
+      for (const peer of peers.current.values()) {
+        const sender = peer.pc
+          .getTransceivers()
+          .find((t) => t.receiver.track.kind === kind)?.sender;
+        if (sender && sender.track !== track) await sender.replaceTrack(track).catch(() => {});
+      }
+    },
+    [outgoing],
+  );
   useEffect(() => {
     fetch('/api/ice')
       .then((r) => r.json())
@@ -68,6 +134,8 @@ export function useCall(myId: string, people: Person[], notify: (message: string
     active.current = false;
     stream.current.getTracks().forEach((t) => t.stop());
     stream.current = new MediaStream();
+    standIns.current?.stop();
+    standIns.current = null;
     setLocalStream(null);
     setInCall(false);
     setMic(false);
@@ -100,7 +168,17 @@ export function useCall(myId: string, people: Person[], notify: (message: string
       };
       pc.ontrack = ({ track }) => {
         peer.stream.addTrack(track);
-        setStreams((previous) => ({ ...previous, [id]: new MediaStream(peer.stream.getTracks()) }));
+        const show = () => {
+          if (peers.current.get(id) === peer)
+            setStreams((previous) => ({
+              ...previous,
+              [id]: new MediaStream(peer.stream.getTracks()),
+            }));
+        };
+        // Phones can leave a track silent or black if it was attached before anything arrived
+        // on it, so it's attached again once it starts.
+        track.onunmute = show;
+        show();
       };
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === 'failed') {
@@ -120,14 +198,15 @@ export function useCall(myId: string, people: Person[], notify: (message: string
               setFailedPeers((previous) => (previous.includes(id) ? previous : [...previous, id]));
           }
         };
-        for (const kind of ['audio', 'video'] as const) {
-          const track = stream.current.getTracks().find((t) => t.kind === kind);
-          pc.addTransceiver(track || kind, { direction: 'sendrecv', streams: [stream.current] });
-        }
+        for (const kind of ['audio', 'video'] as const)
+          pc.addTransceiver(outgoing(kind) || kind, {
+            direction: 'sendrecv',
+            streams: [stream.current],
+          });
       } else if (announce) request('call:signal', { to: id }).catch(() => {});
       return peer;
     },
-    [myId],
+    [myId, outgoing],
   );
   useEffect(() => {
     const accept = async (from: string, peer: Peer, description: RTCSessionDescriptionInit) => {
@@ -137,10 +216,7 @@ export function useCall(myId: string, people: Person[], notify: (message: string
       if (description.type !== 'offer') return;
       // Answer with our current tracks on the transceivers the offer created.
       for (const transceiver of pc.getTransceivers()) {
-        const kind = transceiver.receiver.track.kind;
-        const track =
-          stream.current.getTracks().find((t) => t.kind === kind && t.readyState === 'live') ||
-          null;
+        const track = outgoing(transceiver.receiver.track.kind);
         transceiver.direction = 'sendrecv';
         if (transceiver.sender.track !== track) await transceiver.sender.replaceTrack(track);
       }
@@ -184,7 +260,7 @@ export function useCall(myId: string, people: Person[], notify: (message: string
     return () => {
       socket.off('call:signal', signal);
     };
-  }, [myId, ensurePeer, dropPeer]);
+  }, [myId, ensurePeer, dropPeer, outgoing]);
   useEffect(() => {
     if (!inCall) return;
     // Keep connections to people who are briefly offline; their media flows peer-to-peer meanwhile.
@@ -216,6 +292,7 @@ export function useCall(myId: string, people: Person[], notify: (message: string
       active.current = false;
       Object.assign(callState, { inCall: false, mic: false, camera: false });
       stream.current.getTracks().forEach((t) => t.stop());
+      standIns.current?.stop();
       for (const peer of peers.current.values()) peer.pc.close();
       peers.current.clear();
     },
@@ -242,32 +319,27 @@ export function useCall(myId: string, people: Person[], notify: (message: string
     for (const track of granted.getTracks()) {
       stream.current.addTrack(track);
       track.onended = () => {
+        void send(kind);
         void status().catch(() => {});
         setLocalStream(new MediaStream(stream.current.getTracks()));
       };
     }
-    for (const peer of peers.current.values()) {
-      const sender = peer.pc.getTransceivers().find((t) => t.receiver.track.kind === kind)?.sender;
-      if (sender) await sender.replaceTrack(granted.getTracks()[0]);
-    }
+    await send(kind);
     setLocalStream(new MediaStream(stream.current.getTracks()));
   }
   async function toggle(kind: 'audio' | 'video') {
     if (busy) return;
     setBusy(true);
     try {
+      // Made here, in the tap itself: phones only let sound start from one.
+      standIns.current ??= createStandIns();
       const track = stream.current
         .getTracks()
         .find((t) => t.kind === kind && t.readyState === 'live');
       if (track && kind === 'video') {
         track.stop();
         stream.current.removeTrack(track);
-        for (const peer of peers.current.values()) {
-          const sender = peer.pc
-            .getTransceivers()
-            .find((t) => t.receiver.track.kind === kind)?.sender;
-          if (sender) await sender.replaceTrack(null);
-        }
+        await send(kind);
         setLocalStream(new MediaStream(stream.current.getTracks()));
       } else if (track) track.enabled = !track.enabled;
       else await addTrack(kind);
@@ -287,6 +359,10 @@ export function useCall(myId: string, people: Person[], notify: (message: string
             : err.message || 'Couldn’t connect your device. Please try again.',
       );
     } finally {
+      if (!active.current) {
+        standIns.current?.stop();
+        standIns.current = null;
+      }
       setBusy(false);
     }
   }

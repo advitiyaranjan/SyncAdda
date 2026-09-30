@@ -122,11 +122,11 @@ test('Redis shares room state and Socket.IO events across independent servers', 
   }
 });
 
-test('Redis rooms close when everyone else leaves, or after a stretch without activity', async () => {
+test('Redis rooms stay open while anyone is in them, and while something is playing', async () => {
   const http = createServer(),
     io = new Server(http);
   const redisUrl = `redis://127.0.0.1:6379/${Math.floor(Math.random() * 1000000)}`;
-  const service = await attachRedisRooms(io, { redisUrl, RedisClass: MockRedis, idleMs: 300 });
+  const service = await attachRedisRooms(io, { redisUrl, RedisClass: MockRedis });
   await new Promise((resolve) => http.listen(0, '127.0.0.1', resolve));
   const clients = [];
   const client = async () => {
@@ -147,19 +147,35 @@ test('Redis rooms close when everyone else leaves, or after a stretch without ac
       (await emit(guest, 'room:join', { code: room.code, identity: identity('Bina') })).ok,
       true,
     );
-    const alone = next(host, 'room:ended');
+    let ended = false;
+    host.on('room:ended', () => (ended = true));
     assert.equal((await emit(guest, 'room:leave')).ok, true);
-    assert.match((await alone).message, /Everyone else left/);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(ended, false);
+    assert.equal((await emit(host, 'playback:sync')).ok, true);
 
-    const quiet = await client();
-    const created = await emit(quiet, 'room:create', { identity: identity('Chetan'), name: 'Two' });
-    assert.equal(created.ok, true);
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    const ended = next(quiet, 'room:ended');
-    const sync = await emit(quiet, 'playback:sync');
-    assert.equal(sync.ok, false);
-    assert.match(sync.error, /without activity/);
-    assert.match((await ended).message, /without activity/);
+    // Left empty with something playing: kept, and whoever returns first hosts it.
+    await emit(host, 'room:settings', { locked: true });
+    await emit(host, 'media:add', {
+      title: 'Our movie',
+      url: 'https://example.com/video.mp4',
+      kind: 'video',
+    });
+    const mediaId = (await emit(host, 'playback:sync')).currentId;
+    assert.equal((await emit(host, 'playback:update', { mediaId, playing: true })).ok, true);
+    assert.equal((await emit(host, 'room:leave')).ok, true);
+    const bina = identity('Bina');
+    const back = await emit(guest, 'room:join', { code: room.code, identity: bina });
+    assert.equal(back.ok, true, back.error);
+    assert.equal(back.room.hostId, bina.id);
+    assert.equal(back.room.playback.playing, true);
+
+    // Left empty with nothing playing: gone.
+    assert.equal((await emit(guest, 'playback:update', { mediaId, playing: false })).ok, true);
+    assert.equal((await emit(guest, 'room:leave')).ok, true);
+    const gone = await emit(guest, 'room:join', { code: room.code, identity: bina });
+    assert.equal(gone.ok, false);
+    assert.match(gone.error, /could not be found/);
   } finally {
     clients.forEach((socket) => socket.disconnect());
     await new Promise((resolve) => io.close(resolve));
