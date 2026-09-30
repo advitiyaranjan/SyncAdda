@@ -1717,8 +1717,44 @@ html[data-theme='dark'] {
   flex: 1;
   aspect-ratio: auto;
 }
+/* In fullscreen the controls float over the video and fade out when idle (see Player). */
 .player-shell:fullscreen .player-controls {
-  padding: 0 20px 10px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  padding: 26px 20px 10px;
+  background: linear-gradient(transparent, #0d130ee0 45%);
+  transition: opacity 0.3s;
+}
+.player-shell .player-sync {
+  transition: opacity 0.3s;
+}
+.player-shell.controls-hidden .player-controls,
+.player-shell.controls-hidden .player-sync {
+  opacity: 0;
+  pointer-events: none;
+}
+.player-shell.controls-hidden {
+  cursor: none;
+}
+.controls-wake {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 16px;
+  z-index: 7;
+}
+/* A taller player on larger screens: it fills the space between the header and the call bar. */
+@media (min-width: 901px) {
+  .player-screen {
+    min-height: min(calc(100dvh - 300px), 820px);
+  }
+  .player-shell:fullscreen .player-screen {
+    min-height: 0;
+  }
 }
 .audio-screen > video {
   opacity: 0;

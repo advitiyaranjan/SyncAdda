@@ -179,6 +179,23 @@ test('the owner stays in the room when the server is briefly busy after a reconn
   for (const p of [host, guest]) await p.context().close();
 });
 
+test('the player fills the screen height, and fullscreen controls hide after 5 seconds', async ({
+  page,
+}) => {
+  await enter(page, 'Asha');
+  const screen = (await page.locator('.player-screen').boundingBox())!;
+  expect(screen.height).toBeGreaterThan((screen.width * 9) / 16 + 50);
+  await addVideo(page, 'Big screen');
+  await page.getByRole('button', { name: 'Fullscreen' }).click();
+  await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(true);
+  const shell = page.locator('.player-shell');
+  await expect(shell).not.toHaveClass(/controls-hidden/);
+  await expect(shell).toHaveClass(/controls-hidden/, { timeout: 8_000 });
+  await page.mouse.move(200, 200);
+  await page.mouse.move(300, 300);
+  await expect(shell).not.toHaveClass(/controls-hidden/);
+});
+
 test('only the host controls media, and can let someone add to the queue', async ({
   page,
   browser,

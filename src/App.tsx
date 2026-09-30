@@ -69,7 +69,15 @@ export default function App() {
       }
     };
     const disconnect = () => setConnected(false);
-    const state = (value: Room) => setRoom(value);
+    // Live updates carry only the latest messages; keep the history received when joining.
+    const state = (value: Room) =>
+      setRoom((previous) => {
+        if (!previous || previous.code !== value.code) return value;
+        const known = new Set(value.messages.map((m) => m.id)),
+          from = value.messages[0]?.at ?? Infinity;
+        const earlier = previous.messages.filter((m) => !known.has(m.id) && m.at <= from);
+        return { ...value, messages: [...earlier, ...value.messages] };
+      });
     const ended = ({ message }: { message: string }) => {
       activeCode.current = '';
       setRoom(null);

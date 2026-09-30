@@ -75,6 +75,7 @@ export default function Player({
   const [volume, setVolume] = useState(0.8);
   const [muted, setMuted] = useState(false);
   const [blocked, setBlocked] = useState(false);
+  const [controlsHidden, setControlsHidden] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [playback, setPlayback] = useState(room.playback);
@@ -359,6 +360,21 @@ export default function Player({
       }
     } else await update({ playing: false, position: engineRef.current?.time() || 0 });
   }
+  // In fullscreen, the controls fade out after 5 seconds without a move, tap, or key press.
+  const wakeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const wake = useCallback(() => {
+    setControlsHidden(false);
+    clearTimeout(wakeTimer.current);
+    if (document.fullscreenElement && document.fullscreenElement === containerRef.current)
+      wakeTimer.current = setTimeout(() => setControlsHidden(true), 5000);
+  }, []);
+  useEffect(() => {
+    document.addEventListener('fullscreenchange', wake);
+    return () => {
+      document.removeEventListener('fullscreenchange', wake);
+      clearTimeout(wakeTimer.current);
+    };
+  }, [wake]);
   async function fullscreen() {
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
@@ -372,7 +388,15 @@ export default function Player({
     if (canControl || blocked) void toggle();
   };
   return (
-    <div className="player-shell" ref={containerRef}>
+    <div
+      className={`player-shell ${controlsHidden ? 'controls-hidden' : ''}`}
+      ref={containerRef}
+      onPointerMove={wake}
+      onPointerDown={wake}
+      onKeyDown={wake}
+    >
+      {/* YouTube's frame swallows mouse moves, so this edge brings the controls back. */}
+      {controlsHidden && <div className="controls-wake" onPointerEnter={wake} />}
       <div className={`player-screen ${audio ? 'audio-screen' : ''}`}>
         <div className="youtube-host" ref={youtubeRef} hidden={!videoId} />
         <video

@@ -42,6 +42,7 @@ import type { Identity, Room } from './types';
 import Player from './Player';
 import PersonTile from './PersonTile';
 import { useCall } from './useCall';
+import { useWakeLock } from './useWakeLock';
 import { youtubeId, youtubeTitle } from './youtube';
 import { checkFile, fileTitle, uploadMedia } from './uploads';
 
@@ -101,6 +102,7 @@ export default function WatchRoom({
   }, [mediaUrl]);
   const chatEnd = useRef<HTMLDivElement>(null);
   const call = useCall(identity.id, room.participants, notify);
+  useWakeLock((!!room.currentId && room.playback.playing) || call.inCall);
   const closeModal = useCallback(() => {
     setModal(null);
     setFormError('');

@@ -36,26 +36,56 @@ export function permitted(room, id, need) {
 }
 export const deniedMessage = (need) =>
   need === 'add' ? 'Ask the host to let you add to the queue.' : 'Only the host can do that.';
+// Chat is kept for the life of the room (up to this many messages); live updates carry only the
+// latest ones, and joining sends the whole history.
+export const MAX_MESSAGES = 5000;
+export const STATE_MESSAGES = 100;
+// A room closes after this long with nothing playing, nobody in a call, and no activity.
+export const IDLE_MS = 30 * 60_000;
+export const IDLE_MESSAGE = 'This room closed after 30 minutes without activity.';
+export const ALONE_MESSAGE = 'Everyone else left, so this room has closed.';
+export const isIdle = (room, people, idleMs = IDLE_MS, now = Date.now()) =>
+  !room.playback.playing &&
+  !people.some((p) => p.inCall && p.online) &&
+  now - (room.lastActivity ?? now) >= idleMs;
 export const positionAt = (playback, now = Date.now()) =>
   playback.position +
   (playback.playing ? (Math.max(0, now - playback.updatedAt) / 1000) * playback.rate : 0);
-export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {}) {
+export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000, idleMs = IDLE_MS } = {}) {
   const rooms = new Map();
   const timers = new Set();
   const creationLimits = new Map();
-  const snapshot = (room) => ({
+  const snapshot = (room, full = false) => ({
     ...room,
+    messages: full ? room.messages : room.messages.slice(-STATE_MESSAGES),
     banned: undefined,
     participants: [...room.people.values()].map(({ token, socketId, timer, ...person }) => person),
     people: undefined,
     serverTime: Date.now(),
   });
-  const broadcast = (room) => io.to(room.code).emit('room:state', snapshot(room));
+  const broadcast = (room) => {
+    room.lastActivity = Date.now();
+    io.to(room.code).emit('room:state', snapshot(room));
+  };
+  const endRoom = (room, message) => {
+    io.to(room.code).emit('room:ended', { message });
+    for (const p of room.people.values()) {
+      clearTimeout(p.timer);
+      timers.delete(p.timer);
+      const s = io.sockets.sockets.get(p.socketId);
+      if (s) {
+        s.leave(room.code);
+        s.data = {};
+      }
+    }
+    rooms.delete(room.code);
+    void deleteUploads(droppedUploads(room.playlist, []));
+  };
   const system = (room, text) => {
     room.messages.push({ id: randomUUID(), name: 'SyncAdda', text, at: Date.now(), system: true });
-    room.messages = room.messages.slice(-200);
+    room.messages = room.messages.slice(-MAX_MESSAGES);
   };
-  const remove = (room, id) => {
+  const remove = (room, id, { kicked = false } = {}) => {
     const person = room.people.get(id);
     if (!person) return;
     clearTimeout(person.timer);
@@ -68,6 +98,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       void deleteUploads(droppedUploads(room.playlist, []));
       return;
     }
+    if (!kicked && room.hadCompany && room.people.size < 2) return endRoom(room, ALONE_MESSAGE);
     if (room.hostId === id) {
       room.hostId = (
         [...room.people.values()].find((p) => p.online) || [...room.people.values()][0]
@@ -149,7 +180,8 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       await socket.join(room.code);
       if (!existing) system(room, `${user.name} joined. Make yourself at home!`);
       broadcast(room);
-      return { room: snapshot(room) };
+      if (room.people.size >= 2) room.hadCompany = true;
+      return { room: snapshot(room, true) };
     };
     event('room:create', async (data) => {
       const input = z.object({ identity, name: z.string().trim().min(1).max(48) }).parse(data);
@@ -245,31 +277,17 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
         target.data = {};
         target.emit('room:ended', { message: 'The host removed you from this room.' });
       }
-      remove(room, data.id);
+      remove(room, data.id, { kicked: true });
     });
     event('room:close', () => {
-      const room = current('host');
-      io.to(room.code).emit('room:ended', {
-        message: 'The host ended this watch party. See you next time!',
-      });
-      for (const p of room.people.values()) {
-        clearTimeout(p.timer);
-        timers.delete(p.timer);
-        const s = io.sockets.sockets.get(p.socketId);
-        if (s) {
-          s.leave(room.code);
-          s.data = {};
-        }
-      }
-      rooms.delete(room.code);
-      void deleteUploads(droppedUploads(room.playlist, []));
+      endRoom(current('host'), 'The host ended this watch party. See you next time!');
     });
     event('chat:send', (data) => {
       const room = current();
       const text = z.string().trim().min(1).max(1500).parse(data.text);
       const p = room.people.get(socket.data.personId);
       room.messages.push({ id: randomUUID(), personId: p.id, name: p.name, text, at: Date.now() });
-      room.messages = room.messages.slice(-200);
+      room.messages = room.messages.slice(-MAX_MESSAGES);
       broadcast(room);
     });
     event('reaction:send', (data) => {
@@ -397,10 +415,19 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       if (Date.now() - value.at > 60_000) creationLimits.delete(key);
   }, 60_000);
   cleanup.unref();
+  const idleSweep = setInterval(
+    () => {
+      for (const room of rooms.values())
+        if (isIdle(room, [...room.people.values()], idleMs)) endRoom(room, IDLE_MESSAGE);
+    },
+    Math.min(60_000, idleMs / 2),
+  );
+  idleSweep.unref();
   return {
     rooms,
     dispose() {
       clearInterval(cleanup);
+      clearInterval(idleSweep);
       for (const t of timers) clearTimeout(t);
       timers.clear();
     },

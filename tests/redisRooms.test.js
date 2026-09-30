@@ -121,3 +121,48 @@ test('Redis shares room state and Socket.IO events across independent servers', 
     for (const service of services) await service.dispose();
   }
 });
+
+test('Redis rooms close when everyone else leaves, or after a stretch without activity', async () => {
+  const http = createServer(),
+    io = new Server(http);
+  const redisUrl = `redis://127.0.0.1:6379/${Math.floor(Math.random() * 1000000)}`;
+  const service = await attachRedisRooms(io, { redisUrl, RedisClass: MockRedis, idleMs: 300 });
+  await new Promise((resolve) => http.listen(0, '127.0.0.1', resolve));
+  const clients = [];
+  const client = async () => {
+    const socket = connect(`http://127.0.0.1:${http.address().port}`, {
+      transports: ['websocket'],
+      forceNew: true,
+      reconnection: false,
+    });
+    clients.push(socket);
+    await next(socket, 'connect');
+    return socket;
+  };
+  try {
+    const host = await client(),
+      guest = await client();
+    const { room } = await emit(host, 'room:create', { identity: identity('Asha'), name: 'One' });
+    assert.equal(
+      (await emit(guest, 'room:join', { code: room.code, identity: identity('Bina') })).ok,
+      true,
+    );
+    const alone = next(host, 'room:ended');
+    assert.equal((await emit(guest, 'room:leave')).ok, true);
+    assert.match((await alone).message, /Everyone else left/);
+
+    const quiet = await client();
+    const created = await emit(quiet, 'room:create', { identity: identity('Chetan'), name: 'Two' });
+    assert.equal(created.ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const ended = next(quiet, 'room:ended');
+    const sync = await emit(quiet, 'playback:sync');
+    assert.equal(sync.ok, false);
+    assert.match(sync.error, /without activity/);
+    assert.match((await ended).message, /without activity/);
+  } finally {
+    clients.forEach((socket) => socket.disconnect());
+    await new Promise((resolve) => io.close(resolve));
+    await service.dispose();
+  }
+});

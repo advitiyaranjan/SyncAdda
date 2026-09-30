@@ -228,23 +228,67 @@ test('call signaling requires shared room membership and call participation', as
   await emit(guestClient.socket, 'call:status', { inCall: false, mic: true, camera: true });
   assert.equal(service.rooms.get(room.code).people.get(guestClient.identity.id).mic, false);
 });
-test('leaving transfers hosting, and the last departure deletes the private room', async () => {
+test('leaving transfers hosting, and the room closes when only one person is left', async () => {
   const { host, room } = await setup();
-  const { socket, identity } = await guest(room);
+  const first = await guest(room);
+  const second = await guest(room, 'Maya');
   await emit(host, 'room:leave');
-  assert.equal(service.rooms.get(room.code).hostId, identity.id);
+  assert.equal(service.rooms.get(room.code).hostId, first.identity.id);
+  const ended = nextEvent(second.socket, 'room:ended');
+  await emit(first.socket, 'room:leave');
+  assert.match((await ended).message, /Everyone else left/);
+  assert.equal(service.rooms.has(room.code), false);
+});
+test('someone waiting alone keeps their room; it closes once company leaves', async () => {
+  const { host, room } = await setup();
+  await wait(50);
+  assert.equal(service.rooms.has(room.code), true);
+  const { socket } = await guest(room);
+  const ended = nextEvent(host, 'room:ended');
   await emit(socket, 'room:leave');
+  assert.match((await ended).message, /Everyone else left/);
   assert.equal(service.rooms.has(room.code), false);
 });
 test('a dropped connection keeps its seat temporarily, then expires and transfers host', async () => {
   const { host, room, identity } = await setup();
   const joined = await guest(room);
+  await guest(room, 'Maya');
   host.disconnect();
   await wait(30);
   assert.equal(service.rooms.get(room.code).people.get(identity.id).online, false);
   await wait(160);
   assert.equal(service.rooms.get(room.code).people.has(identity.id), false);
   assert.equal(service.rooms.get(room.code).hostId, joined.identity.id);
+});
+test('the whole chat is kept and sent to people who join later', async () => {
+  const { host, room } = await setup();
+  // More than live updates carry (100), within the rate limit.
+  for (let i = 0; i < 130; i++) await emit(host, 'chat:send', { text: `Message ${i}` });
+  const late = await guest(room);
+  const chat = late.room.messages.filter((m) => !m.system);
+  assert.equal(chat.length, 130);
+  assert.equal(chat[0].text, 'Message 0');
+});
+test('a room closes after a stretch without activity', async () => {
+  const idleHttp = createServer(),
+    idleIo = new Server(idleHttp),
+    idleService = attachRooms(idleIo, { idleMs: 150 });
+  await new Promise((resolve) => idleHttp.listen(0, '127.0.0.1', resolve));
+  const socket = connect(`http://127.0.0.1:${idleHttp.address().port}`, {
+    transports: ['websocket'],
+    forceNew: true,
+    reconnection: false,
+  });
+  try {
+    await nextEvent(socket, 'connect');
+    const { room } = await emit(socket, 'room:create', { identity: user('Asha'), name: 'Quiet' });
+    assert.match((await nextEvent(socket, 'room:ended')).message, /without activity/);
+    assert.equal(idleService.rooms.has(room.code), false);
+  } finally {
+    socket.disconnect();
+    idleService.dispose();
+    await new Promise((resolve) => idleIo.close(resolve));
+  }
 });
 test('closing a room clears its state and notifies participants', async () => {
   const { host, room } = await setup();
