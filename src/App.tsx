@@ -36,7 +36,8 @@ export default function App() {
       setConnected(true);
       const restore =
         activeCode.current || (pathCode() && identityRef.current.name ? pathCode() : '');
-      if (restore) {
+      if (!restore) return;
+      for (let attempt = 0; ; attempt++) {
         try {
           const data = await request<{ room: Room }>('room:join', {
             code: restore,
@@ -46,11 +47,24 @@ export default function App() {
           activeCode.current = restore;
           setRoom(data.room);
           setDialog(null);
+          return;
         } catch (e) {
+          // Dropped again: the next connect event tries again.
+          if (!socket.connected) return;
+          // A brief hiccup on the room server (such as right after hosting recycles a
+          // connection) shouldn't send anyone back to the lobby, where their seat, and the
+          // host's role, would lapse if they don't rejoin in time.
+          if (attempt < 3 && /busy|took too long|too fast/i.test((e as Error).message)) {
+            await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
+            // Unless they've left or moved on meanwhile.
+            if ((activeCode.current || pathCode()) !== restore) return;
+            continue;
+          }
           activeCode.current = '';
           setRoom(null);
           setDialog('join');
           setError((e as Error).message);
+          return;
         }
       }
     };

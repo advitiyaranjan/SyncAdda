@@ -73,6 +73,23 @@ npm run check               # Type check, production build, server and browser t
 
 The browser tests use a local CC0 media fixture and byte-range responses, so playback tests don't depend on third-party streaming availability. They cover desktop/mobile rendering, room entry, two-browser chat/play/pause/seek/speed, host permissions, session restoration, simulated two-way video/audio, independent call controls, and validation. Screenshots and failure traces are written to `test-results/`.
 
+A few tests need more than the local dev server and are skipped otherwise:
+
+```sh
+# Reconnects: the production room logic (Redis) with network-like latency, and a route that
+# drops every connection the way hosting does (optionally while the room is still busy).
+npm run build && node tests/support/prod-like-server.js
+SYNCADDA_URL=http://localhost:3001 SYNCADDA_DROP_URL=http://localhost:3001/api/test/drop-all \
+  npx playwright test tests/browser/call.spec.ts tests/browser/room.spec.ts
+
+# Against the deployment, including a ~6 minute wait for Vercel to recycle a real connection
+# (the owner, queue access, and the call must all survive it).
+SYNCADDA_URL=https://adda.advitiyaranjan.in SYNCADDA_LIVE_RECONNECT=1 \
+  npx playwright test tests/browser/call.spec.ts tests/browser/room.spec.ts
+```
+
+Uploads (`upload.spec.ts`) run when the server has `BLOB_READ_WRITE_TOKEN`, and YouTube playback (`youtube.spec.ts`) needs access to youtube.com.
+
 Real iOS/Android hardware, public-network TURN connectivity, and long-session synchronization should be validated in the intended hosting environment before a public launch.
 
 ## Project map

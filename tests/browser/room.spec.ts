@@ -47,6 +47,138 @@ async function addVideo(page: Page, title: string) {
   await expect(page.getByRole('dialog')).toHaveCount(0);
 }
 
+async function joinCallWithCamera(page: Page) {
+  await page.getByRole('button', { name: 'Join call', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Leave call', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Turn camera on' }).click();
+  await expect(page.getByRole('button', { name: 'Turn camera off' })).toBeVisible();
+}
+async function expectCamera(viewer: Page, name: string) {
+  const video = viewer.locator('.person-tile').filter({ hasText: name }).locator('video');
+  await expect(video).toHaveClass(/has-camera/, { timeout: 30_000 });
+  await expect
+    .poll(
+      () =>
+        video.evaluate(
+          (el: HTMLVideoElement) => el.readyState >= 2 && el.videoWidth > 0 && !el.paused,
+        ),
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+}
+
+// Vercel ends every WebSocket after about five minutes and the app reconnects. This waits for
+// a real one, so it takes about six minutes and runs only when asked, against a deployment:
+// SYNCADDA_URL=https://adda.advitiyaranjan.in SYNCADDA_LIVE_RECONNECT=1
+test('the owner keeps the room, permissions, and the call through a real hosting reconnect', async ({
+  browser,
+}) => {
+  test.skip(
+    !base || !process.env.SYNCADDA_LIVE_RECONNECT,
+    'set SYNCADDA_URL to a deployment and SYNCADDA_LIVE_RECONNECT=1',
+  );
+  test.setTimeout(10 * 60_000);
+  const open = async () => {
+    const context = await browser.newContext({ permissions: ['camera', 'microphone'] });
+    const page = await context.newPage();
+    const sockets: { opened: number; closed?: number }[] = [];
+    page.on('websocket', (ws) => {
+      if (!ws.url().includes('/api/socket')) return;
+      const entry: { opened: number; closed?: number } = { opened: Date.now() };
+      sockets.push(entry);
+      ws.on('close', () => (entry.closed = Date.now()));
+    });
+    return { page, sockets };
+  };
+  const host = await open(),
+    guest = await open();
+  await enter(host.page, 'Asha');
+  await enter(guest.page, 'Bina', host.page.url());
+
+  // Before the reconnect: the guest may add to the queue, there's a video, and a call is on.
+  await host.page.getByRole('tab', { name: /People/ }).click();
+  await host.page.getByLabel('Manage Bina').click();
+  await host.page.getByRole('button', { name: 'Let them add to queue' }).click();
+  await expect(guest.page.getByRole('button', { name: 'Add media' })).toBeVisible();
+  await addVideo(host.page, 'After the reconnect');
+  for (const p of [host.page, guest.page]) await joinCallWithCamera(p);
+  await expectCamera(host.page, 'Bina');
+  await expectCamera(guest.page, 'Asha');
+
+  // Wait for hosting to close each person's connection and the app to reconnect.
+  for (const [name, who] of [
+    ['host', host],
+    ['guest', guest],
+  ] as const) {
+    await expect
+      .poll(() => who.sockets.length, { timeout: 8 * 60_000, intervals: [5_000] })
+      .toBeGreaterThanOrEqual(2);
+    const [first, second] = who.sockets;
+    console.log(
+      `${name}: connection closed after ${((first.closed! - first.opened) / 1000).toFixed(0)}s, ` +
+        `reconnected ${((second.opened - first.closed!) / 1000).toFixed(1)}s later`,
+    );
+  }
+  for (const p of [host.page, guest.page])
+    await expect(p.getByText('Connected', { exact: true })).toBeVisible();
+
+  // The owner is still the owner, on both screens.
+  await expect(host.page.getByRole('button', { name: 'Room settings' })).toBeVisible();
+  await expect(guest.page.getByRole('button', { name: 'Room settings' })).toHaveCount(0);
+  for (const p of [host.page, guest.page]) {
+    await p.getByRole('tab', { name: /People/ }).click();
+    await expect(p.locator('.participant-row').filter({ hasText: 'Asha' })).toContainText(
+      'Room host',
+    );
+  }
+  // The guest kept queue access, but still doesn't have the remote.
+  await expect(guest.page.getByRole('button', { name: 'Add media' })).toBeVisible();
+  await expect(
+    guest.page.getByRole('button', { name: 'Play for everyone', exact: true }).last(),
+  ).toBeDisabled();
+  // The owner's controls still reach everyone.
+  await host.page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
+  await expect
+    .poll(() =>
+      guest.page.locator('.player-screen video').evaluate((el: HTMLVideoElement) => el.paused),
+    )
+    .toBe(false);
+  // And the call carried on through the reconnect.
+  await expect(host.page.getByText('2 people in the call', { exact: true })).toBeVisible();
+  await expectCamera(host.page, 'Bina');
+  await expectCamera(guest.page, 'Asha');
+  for (const who of [host, guest]) await who.page.context().close();
+});
+
+// Needs a server that can drop every socket, such as tests/support/prod-like-server.js
+// (SYNCADDA_DROP_URL=http://localhost:3001/api/test/drop-all).
+test('the owner stays in the room when the server is briefly busy after a reconnect', async ({
+  browser,
+}) => {
+  test.skip(!process.env.SYNCADDA_DROP_URL, 'needs a server that can drop all sockets');
+  test.setTimeout(90_000);
+  const [host, guest] = await Promise.all(
+    [0, 1].map(async () => (await browser.newContext()).newPage()),
+  );
+  await enter(host, 'Asha');
+  await enter(guest, 'Bina', host.url());
+  // Longer than one rejoin attempt waits for the room, so the first attempt fails as "busy".
+  await fetch(`${process.env.SYNCADDA_DROP_URL}?busyMs=15000`, { method: 'POST' });
+  await host.waitForTimeout(20_000);
+  for (const p of [host, guest]) {
+    await expect(p.getByRole('heading', { name: 'Your people are waiting.' })).toHaveCount(0);
+    await expect(p.getByText('Connected', { exact: true })).toBeVisible();
+  }
+  await expect(host.getByRole('button', { name: 'Room settings' })).toBeVisible();
+  await addVideo(host, 'Still the host');
+  await expect(guest.getByRole('heading', { name: 'Still the host', exact: true })).toBeVisible();
+  await guest.getByRole('tab', { name: /People/ }).click();
+  await expect(guest.locator('.participant-row').filter({ hasText: 'Asha' })).toContainText(
+    'Room host',
+  );
+  for (const p of [host, guest]) await p.context().close();
+});
+
 test('only the host controls media, and can let someone add to the queue', async ({
   page,
   browser,

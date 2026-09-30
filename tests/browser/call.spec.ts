@@ -41,7 +41,8 @@ async function expectCamera(viewer: Page, name: string) {
 }
 
 // Hosting closes WebSockets every few minutes; calls must carry on through the reconnect.
-// Needs a server with a route that drops every socket, e.g. SYNCADDA_DROP_URL=http://localhost:3001/api/drop-all
+// Needs a server that can drop every socket, such as tests/support/prod-like-server.js
+// (SYNCADDA_DROP_URL=http://localhost:3001/api/test/drop-all).
 test('calls and cameras survive the room connection dropping for everyone', async ({ browser }) => {
   test.skip(!process.env.SYNCADDA_DROP_URL, 'needs a server that can drop all sockets');
   const a = await person(browser, 'Asha');
@@ -49,7 +50,7 @@ test('calls and cameras survive the room connection dropping for everyone', asyn
   for (const p of [a, b]) await joinWithCamera(p);
   await expectCamera(a, 'Bina');
   await expectCamera(b, 'Asha');
-  await fetch(process.env.SYNCADDA_DROP_URL!);
+  await fetch(process.env.SYNCADDA_DROP_URL!, { method: 'POST' });
   for (const p of [a, b]) await expect(p.getByText('Connected', { exact: true })).toBeVisible();
   await expect(a.getByText('2 people in the call', { exact: true })).toBeVisible();
   await a.waitForTimeout(3000);
