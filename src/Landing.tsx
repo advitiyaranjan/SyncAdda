@@ -80,7 +80,7 @@ export default function Landing({
     ],
     [
       'What can we watch or listen to?',
-      'Add a direct link to a video or audio file, or an HLS live stream. MP4, WebM, MP3, and other formats supported by your browser work. YouTube links work too, as long as the owner allows the video to play on other websites. You can also share a video or song from your device (up to 100 MB); it’s deleted when the room closes. We also include a few open movies to get you started. Subscription streaming services aren’t supported.',
+      'Add a direct link to a video or audio file, or an HLS live stream. MP4, WebM, MP3, and other formats supported by your browser work. YouTube links work too, as long as the owner allows the video to play on other websites. You can also share a video or song from your device (up to 100 MB); it’s deleted when the room closes. Or play a file straight from your device without uploading it: everyone chooses their own copy, and it stays in sync. Subscription streaming services aren’t supported.',
     ],
     [
       'How does watching together work?',

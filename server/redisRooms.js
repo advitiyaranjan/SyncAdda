@@ -25,7 +25,8 @@ const mediaSchema = z.object({
     .string()
     .url()
     .max(2048)
-    .refine((url) => /^https?:\/\//i.test(url)),
+    // A web link, or a file each person plays from their own device (its name and size).
+    .refine((url) => /^https?:\/\//i.test(url) || /^local:[^#]+#\d+$/.test(url)),
   kind: z.enum(['video', 'audio']),
 });
 const key = (code) => `syncadda:room:${code}`;

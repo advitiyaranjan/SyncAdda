@@ -306,3 +306,69 @@ test('playback stays within a few frames across viewers', async ({ page, browser
   expect(gaps[2]).toBeLessThan(0.1);
   await guestContext.close();
 });
+
+// A stand-in for the browser's screen lock that counts what the page holds.
+function fakeWakeLock() {
+  const wake = { held: 0, last: null as null | { release(): Promise<void> } };
+  (window as any).__wake = wake;
+  Object.defineProperty(navigator, 'wakeLock', {
+    configurable: true,
+    value: {
+      request: async () => {
+        const sentinel = Object.assign(new EventTarget(), {
+          released: false,
+          async release() {
+            if (sentinel.released) return;
+            sentinel.released = true;
+            wake.held--;
+            sentinel.dispatchEvent(new Event('release'));
+          },
+        });
+        wake.held++;
+        wake.last = sentinel;
+        return sentinel;
+      },
+    },
+  });
+}
+const held = (page: Page) => page.evaluate(() => (window as any).__wake.held);
+
+test('the screen is kept on for everyone while something plays', async ({ page, browser }) => {
+  await page.addInitScript(fakeWakeLock);
+  await enter(page, 'Asha');
+  const context = await browser.newContext();
+  const guest = await context.newPage();
+  await guest.addInitScript(fakeWakeLock);
+  await enter(guest, 'Bina', page.url());
+  await addVideo(page, 'Movie night');
+  expect(await held(page)).toBe(0);
+  await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
+  for (const p of [page, guest]) await expect.poll(() => held(p)).toBe(1);
+  // The phone can take the lock away (a low battery, say): it's taken again.
+  await guest.evaluate(() => (window as any).__wake.last.release());
+  await expect.poll(() => held(guest)).toBe(1);
+  await page.getByRole('button', { name: 'Pause for everyone', exact: true }).click();
+  for (const p of [page, guest]) await expect.poll(() => held(p)).toBe(0);
+  await context.close();
+});
+
+test('a video paused by the phone in the background starts again at once', async ({ page }) => {
+  await enter(page, 'Asha');
+  await addVideo(page, 'Movie night');
+  await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
+  const video = page.locator('.player-screen video');
+  await expect.poll(() => video.evaluate((el: HTMLVideoElement) => !el.paused)).toBe(true);
+  // What a phone does when the page goes to the background: hides it, and pauses its video.
+  const resumed = await video.evaluate(async (el: HTMLVideoElement) => {
+    Object.defineProperty(document, 'visibilityState', { get: () => 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    el.pause();
+    // Well inside the sync loop's 300 ms, which a phone may never get round to.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return !el.paused;
+  });
+  expect(resumed).toBe(true);
+  // Still playing for the room, and nobody is asked to tap.
+  await expect(page.getByRole('button', { name: 'Pause for everyone', exact: true })).toBeVisible();
+  await expect(page.locator('.autoplay-prompt')).toHaveCount(0);
+});

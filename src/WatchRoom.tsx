@@ -37,7 +37,7 @@ import {
   X,
 } from 'lucide-react';
 import { Brand, Modal } from './components';
-import { colorFor, initials, request, samples, socket } from './lib';
+import { colorFor, initials, request, socket } from './lib';
 import type { Identity, Room } from './types';
 import Player from './Player';
 import FullscreenChat from './FullscreenChat';
@@ -45,7 +45,8 @@ import PersonTile from './PersonTile';
 import { useCall } from './useCall';
 import { useWakeLock } from './useWakeLock';
 import { youtubeId, youtubeTitle } from './youtube';
-import { checkFile, fileTitle, uploadMedia } from './uploads';
+import { checkFile, fileKind, fileTitle, uploadMedia } from './uploads';
+import { chooseLocal, localUrl } from './localFiles';
 
 export default function WatchRoom({
   room,
@@ -70,7 +71,7 @@ export default function WatchRoom({
   const [panel, setPanel] = useState<'chat' | 'video' | 'queue' | 'people'>('chat');
   const [mobileView, setMobileView] = useState<'watch' | 'chat' | 'people' | 'call'>('watch');
   const [modal, setModal] = useState<'media' | 'settings' | 'leave' | 'close' | null>(null);
-  const [mediaTab, setMediaTab] = useState<'link' | 'file' | 'samples'>('link');
+  const [mediaTab, setMediaTab] = useState<'link' | 'file' | 'local'>('link');
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [mediaTitle, setMediaTitle] = useState('');
@@ -217,7 +218,16 @@ export default function WatchRoom({
       setProgress(null);
     }
   }
+  // Plays from this device without uploading; everyone else picks their own copy of the file.
+  async function playLocal() {
+    const kind = mediaFile && fileKind(mediaFile);
+    if (!mediaFile || !kind || busy) return;
+    const url = localUrl(mediaFile);
+    chooseLocal(url, mediaFile);
+    await addMedia({ title: mediaTitle.trim() || fileTitle(mediaFile), url, kind });
+  }
   const add = () => {
+    setMediaFile(null);
     setMediaTab('link');
     setFormError('');
     setModal('media');
@@ -824,6 +834,7 @@ export default function WatchRoom({
               className={mediaTab === 'file' ? 'active' : ''}
               onClick={() => {
                 setMediaTab('file');
+                setMediaFile(null);
                 setFormError('');
               }}
             >
@@ -831,11 +842,15 @@ export default function WatchRoom({
               From your device
             </button>
             <button
-              className={mediaTab === 'samples' ? 'active' : ''}
-              onClick={() => setMediaTab('samples')}
+              className={mediaTab === 'local' ? 'active' : ''}
+              onClick={() => {
+                setMediaTab('local');
+                setMediaFile(null);
+                setFormError('');
+              }}
             >
               <Film size={15} />
-              Try an open movie
+              Play without uploading
             </button>
           </div>
           {mediaTab === 'link' ? (
@@ -980,36 +995,62 @@ export default function WatchRoom({
               </button>
             </form>
           ) : (
-            <div className="sample-list">
-              {samples.map((sample, index) => (
-                <button disabled={busy} key={sample.title} onClick={() => addMedia(sample)}>
-                  <span className={`sample-art sample-${index}`}>
-                    <Film size={24} />
-                  </span>
-                  <span>
-                    <strong>{sample.title}</strong>
-                    <small>
-                      {
-                        [
-                          'An epic quest. An unlikely friendship.',
-                          'A big bunny. A little mischief.',
-                          'A sci-fi story with a human heart.',
-                        ][index]
-                      }
-                    </small>
-                  </span>
-                  <Plus size={18} />
-                </button>
-              ))}
-              <p>
-                Open movies by the Blender Foundation. Streamed from Google’s public sample library.
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void playLocal();
+              }}
+            >
+              <label>
+                Video or song
+                <input
+                  type="file"
+                  accept="video/*,audio/*"
+                  disabled={busy}
+                  required
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null;
+                    const problem = file && !fileKind(file) ? 'Choose a video or audio file.' : '';
+                    setFormError(problem);
+                    setMediaFile(problem ? null : file);
+                    if (problem) e.target.value = '';
+                    else if (file) setMediaTitle(fileTitle(file));
+                  }}
+                />
+                <small>
+                  Any size. MP4, WebM, MP3, M4A, and other formats your browser can play.
+                </small>
+              </label>
+              <label>
+                Give it a title
+                <input
+                  value={mediaTitle}
+                  onChange={(e) => setMediaTitle(e.target.value)}
+                  placeholder="Something everyone should see"
+                  required
+                  maxLength={100}
+                />
+              </label>
+              <p className="source-note">
+                Nothing is uploaded: it plays straight from your device. Friends need the same file
+                on theirs; they’ll be asked to choose it, and it stays in sync for everyone.
               </p>
               {formError && (
                 <p className="form-error" role="alert">
                   {formError}
                 </p>
               )}
-            </div>
+              <button className="button primary wide" disabled={busy || !mediaFile}>
+                {busy ? (
+                  <LoaderCircle className="spin" size={18} />
+                ) : (
+                  <>
+                    <Plus size={17} />
+                    Add to our queue
+                  </>
+                )}
+              </button>
+            </form>
           )}
         </Modal>
       )}

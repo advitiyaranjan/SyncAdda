@@ -20,7 +20,11 @@ const mediaSchema = z.object({
     .string()
     .url()
     .max(2048)
-    .refine((value) => /^https?:\/\//i.test(value), 'Use an http or https media URL.'),
+    // A web link, or a file each person plays from their own device (its name and size).
+    .refine(
+      (value) => /^https?:\/\//i.test(value) || /^local:[^#]+#\d+$/.test(value),
+      'Use an http or https media URL.',
+    ),
   kind: z.enum(['video', 'audio']),
 });
 /**

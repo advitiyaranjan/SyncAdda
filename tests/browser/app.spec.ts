@@ -227,21 +227,31 @@ test('invalid room codes display helpful errors, and dialogs work with the keybo
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
-test('the shared queue advances once at the end, supports sample movies, and can be cleared', async ({
+test('the shared queue advances once at the end, plays a file from the device, and can be cleared', async ({
   page,
 }) => {
   await page.route('https://media.example.test/flower.mp4', serveMedia);
-  await page.route('https://storage.googleapis.com/gtv-videos-bucket/sample/**', serveMedia);
   await createRoom(page);
   await addFixture(page);
   await page.getByRole('button', { name: 'Add media', exact: true }).click();
-  await page.getByRole('button', { name: 'Try an open movie' }).click();
-  await page.getByRole('button', { name: /Big Buck Bunny/ }).click();
+  await page.getByRole('button', { name: 'Play without uploading' }).click();
+  await page.getByLabel('Video or song').setInputFiles(fixture);
+  await expect(page.getByLabel('Give it a title')).toHaveValue('flower');
+  await page.getByLabel('Give it a title').fill('Big Buck Bunny');
+  await page.getByRole('button', { name: 'Add to our queue' }).click();
   await expect(page.locator('.queue-item')).toHaveCount(2);
   await page.getByRole('slider', { name: 'Seek for everyone' }).fill('4.8');
   await expect(page.locator('.player-time')).toContainText('0:04');
   await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
   await expect(page.getByRole('heading', { name: 'Big Buck Bunny', exact: true })).toBeVisible();
+  // The file added from this device plays here without being asked for again.
+  await expect
+    .poll(() =>
+      page
+        .locator('.player-screen video')
+        .evaluate((el: HTMLVideoElement) => el.src.startsWith('blob:') && el.currentTime > 0),
+    )
+    .toBe(true);
   await page.getByRole('button', { name: 'Pause for everyone', exact: true }).click();
   await page.getByRole('button', { name: 'Remove Big Buck Bunny' }).click();
   await expect(
@@ -251,4 +261,41 @@ test('the shared queue advances once at the end, supports sample movies, and can
   await expect(page.getByRole('heading', { name: 'What are we watching?' })).toBeVisible();
   await page.getByRole('button', { name: 'React 🍿', exact: true }).click();
   await expect(page.locator('.floating-reactions')).toContainText('Advitiya');
+});
+
+test('a file played without uploading is chosen by each person and stays in sync', async ({
+  page,
+  browser,
+}) => {
+  const requests: string[] = [];
+  page.on('request', (request) => requests.push(`${request.method()} ${request.url()}`));
+  const url = await createRoom(page);
+  const context = await browser.newContext();
+  const guest = await context.newPage();
+  await joinRoom(guest, url);
+
+  await page.getByRole('button', { name: 'Choose something to watch' }).click();
+  await page.getByRole('button', { name: 'Play without uploading' }).click();
+  await page.getByLabel('Video or song').setInputFiles(fixture);
+  await page.getByRole('button', { name: 'Add to our queue' }).click();
+  await expect(page.getByRole('heading', { name: 'flower', exact: true })).toBeVisible();
+  // Nothing left this device.
+  expect(requests.filter((r) => !r.startsWith('GET ') && !r.includes('/socket.io/'))).toEqual([]);
+
+  // The guest is asked for their own copy, by name.
+  await expect(guest.getByRole('heading', { name: 'flower', exact: true })).toBeVisible();
+  await expect(guest.getByText('Choose “flower.mp4” on this device')).toBeVisible();
+  await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
+  await guest.getByLabel('Choose the file').setInputFiles(fixture);
+  await expect(guest.getByText('Choose “flower.mp4” on this device')).toHaveCount(0);
+  const video = (p: Page) => p.locator('.player-screen video');
+  for (const p of [page, guest])
+    await expect
+      .poll(() => video(p).evaluate((el: HTMLVideoElement) => !el.paused && el.currentTime > 0))
+      .toBe(true);
+  const [mine, theirs] = await Promise.all(
+    [page, guest].map((p) => video(p).evaluate((el: HTMLVideoElement) => el.currentTime)),
+  );
+  expect(Math.abs(mine - theirs)).toBeLessThan(0.5);
+  await context.close();
 });

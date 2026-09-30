@@ -20,6 +20,9 @@ const extensionTypes: Record<string, string> = {
 const mediaType = (file: File) =>
   file.type || extensionTypes[file.name.split('.').pop()?.toLowerCase() || ''] || '';
 
+export const fileKind = (file: File) =>
+  /^(video|audio)\//.exec(mediaType(file))?.[1] as 'video' | 'audio' | undefined;
+
 export const fileTitle = (file: File) =>
   file.name
     .replace(/\.[^.]+$/, '')

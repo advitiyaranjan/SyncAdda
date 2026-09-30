@@ -79,6 +79,11 @@ export default function App() {
         const earlier = previous.messages.filter((m) => !known.has(m.id) && m.at <= from);
         return { ...value, messages: [...earlier, ...value.messages] };
       });
+    // Play, pause, and seek arrive on their own, without the rest of the room.
+    const played = ({ playback, currentId }: Pick<Room, 'playback' | 'currentId'>) =>
+      setRoom((previous) =>
+        previous && previous.currentId === currentId ? { ...previous, playback } : previous,
+      );
     const ended = ({ message }: { message: string }) => {
       activeCode.current = '';
       setRoom(null);
@@ -89,12 +94,14 @@ export default function App() {
     socket.on('connect', connect);
     socket.on('disconnect', disconnect);
     socket.on('room:state', state);
+    socket.on('playback:state', played);
     socket.on('room:ended', ended);
     socket.connect();
     return () => {
       socket.off('connect', connect);
       socket.off('disconnect', disconnect);
       socket.off('room:state', state);
+      socket.off('playback:state', played);
       socket.off('room:ended', ended);
       socket.disconnect();
     };

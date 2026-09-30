@@ -2760,56 +2760,6 @@ input[type='file']::file-selector-button {
   background: var(--orange);
   transition: width 0.2s;
 }
-.sample-list > button {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 12px 0;
-  border-bottom: 1px solid #e1e7d8;
-  text-align: left;
-}
-.sample-art {
-  width: 49px;
-  height: 55px;
-  border-radius: 7px;
-  display: grid;
-  place-items: center;
-  background: #dce5d1;
-  color: #819370;
-  flex-shrink: 0;
-}
-.sample-1 {
-  background: #e9dfc9;
-  color: #a89977;
-}
-.sample-2 {
-  background: #dbd9e5;
-  color: #8f86a1;
-}
-.sample-list > button > span:nth-child(2) {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 7px;
-}
-.sample-list strong {
-  font-size: 12px;
-  font-weight: 500;
-}
-.sample-list small {
-  font-size: 9px;
-  color: #909a80;
-}
-.sample-list > button > svg {
-  color: #9bab87;
-}
-.sample-list > p {
-  font-size: 9px;
-  line-height: 1.8;
-  color: #a0aa90;
-  margin: 18px 0 0;
-}
 .setting-row {
   display: flex;
   align-items: center;

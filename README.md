@@ -29,7 +29,7 @@ Open **http://localhost:5173**. Vite serves the frontend and proxies Socket.IO a
 
 Paste a **direct, publicly accessible** media URL, such as `.mp4`, `.webm`, `.mp3`, or `.m3u8`. Browser codec support still applies. For reliable seeking, file servers must support byte-range requests. HLS sources must allow cross-origin requests. Use HTTPS media on an HTTPS deployment.
 
-The included sample chooser offers **Sintel**, **Big Buck Bunny**, and **Tears of Steel**, open movies by the Blender Foundation, streamed from Google's public sample library. YouTube links play through YouTube's embedded player (videos that disallow embedding won't play). DRM-protected sources and subscription streaming services are not supported.
+**Play without uploading:** a video or song of any size can be played straight from your device. Nothing is uploaded; the room shares only the file's name and size, everyone else is asked to choose their own copy of the same file, and playback stays in sync. YouTube links play through YouTube's embedded player (videos that disallow embedding won't play). DRM-protected sources and subscription streaming services are not supported.
 
 **From your device:** a video or song up to 100 MB can be uploaded once to Vercel Blob (straight from the browser, never through the app server) and streamed to everyone in the room. Uploads are deleted when removed from the queue or when the room closes, and a daily cron (`/api/cleanup-uploads`) removes anything older than 24 hours left by rooms that expired. Uploads need `BLOB_READ_WRITE_TOKEN`, which Vercel provides when a Blob store is connected to the project.
 

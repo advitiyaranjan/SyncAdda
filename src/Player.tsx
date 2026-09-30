@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   Film,
   LoaderCircle,
@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import type Hls from 'hls.js';
 import { request, socket, time } from './lib';
+import { chooseLocal, chosenLocal, localFile, onLocalChange } from './localFiles';
 import type { Engine, Playback, Room } from './types';
 import {
   YT_STATE,
@@ -106,6 +107,12 @@ export default function Player({
   qualityRef.current = quality;
   const media = room.playlist.find((m) => m.id === room.currentId);
   const videoId = media ? youtubeId(media.url) : null;
+  // A file each person plays from their own device: this device's copy, once it's been chosen.
+  const local = media ? localFile(media.url) : null;
+  const localSource = useSyncExternalStore(onLocalChange, () =>
+    media ? chosenLocal(media.url) : undefined,
+  );
+  const needsFile = !!local && !localSource;
   const mediaIdRef = useRef(room.currentId);
   mediaIdRef.current = room.currentId;
   const volumeRef = useRef({ volume, muted });
@@ -184,13 +191,44 @@ export default function Player({
           if (engineRef.current === engine) setBlocked(false);
         })
         .catch(() => {
-          if (engineRef.current === engine && state.current.playing) setBlocked(true);
+          // In the background it just keeps trying; asking for a tap waits until they're back.
+          if (
+            engineRef.current === engine &&
+            state.current.playing &&
+            document.visibilityState === 'visible'
+          )
+            setBlocked(true);
         })
         .finally(() => {
           if (playAttempt.current === engine) playAttempt.current = null;
         });
     } else if (!target.playing && !engine.paused()) engine.pause();
   }, []);
+  // Phones pause a video the moment the page goes to the background (another app, a locked
+  // screen), though a song carries on. Start it again right away, so its sound carries on too:
+  // waiting for the next sync tick can be too late, as a silent page in the background is put
+  // to sleep.
+  const hiddenResumes = useRef(0);
+  const resumeHidden = useCallback(() => {
+    const engine = engineRef.current;
+    if (document.visibilityState === 'visible') {
+      hiddenResumes.current = 0;
+      return;
+    }
+    // A few times at most, in case the browser insists; the sync loop carries on after that.
+    if (!engine || !state.current.playing || !engine.paused() || engine.ended()) return;
+    if (hiddenResumes.current++ >= 5) return;
+    engine.play().catch(() => {});
+  }, []);
+  useEffect(() => {
+    const el = videoRef.current;
+    document.addEventListener('visibilitychange', resumeHidden);
+    el?.addEventListener('pause', resumeHidden);
+    return () => {
+      document.removeEventListener('visibilitychange', resumeHidden);
+      el?.removeEventListener('pause', resumeHidden);
+    };
+  }, [resumeHidden]);
   useEffect(() => {
     state.current = room.playback;
     setPlayback(room.playback);
@@ -289,13 +327,14 @@ export default function Player({
             else setLoading(false);
             if (value === YT_STATE.PLAYING) setBlocked(false);
             if (value === YT_STATE.ENDED) endedRef.current();
+            if (value === YT_STATE.PAUSED) resumeHidden();
             if (!automatic && (value === YT_STATE.PLAYING || value === YT_STATE.PAUSED))
               youtubeActionRef.current(value);
           },
           blocked: () => {
             if (disposed) return;
             setLoading(false);
-            setBlocked(true);
+            if (document.visibilityState === 'visible') setBlocked(true);
           },
           error: (code) => {
             if (disposed) return;
@@ -358,10 +397,13 @@ export default function Player({
             setError('The live-stream player could not load. Please refresh and try again.');
           }
         });
-    } else {
+    } else if (!local) {
       el.src = media.url;
       el.load();
-    }
+    } else if (localSource) {
+      el.src = localSource;
+      el.load();
+    } else setLoading(false);
     return () => {
       clearTimeout(seekTimer.current);
       clearInterval(poll);
@@ -374,7 +416,7 @@ export default function Player({
       el.removeAttribute('src');
       el.load();
     };
-  }, [media?.url, media?.id]);
+  }, [media?.url, media?.id, localSource]);
   useEffect(() => {
     engineRef.current?.setVolume(volume, muted);
   }, [volume, muted, media?.id]);
@@ -395,8 +437,14 @@ export default function Player({
       canControl
         ? () => void updateRef.current({ playing, position: engineRef.current?.time() || 0 })
         : null;
+    // Pressing play there is a tap, which is what a phone wants before it lets a video it
+    // paused in the background carry on: so start this device's player in it, too.
+    const play = () => {
+      if (state.current.playing) void engineRef.current?.play().catch(() => {});
+      else control(true)?.();
+    };
     const actions: [MediaSessionAction, MediaSessionActionHandler | null][] = [
-      ['play', control(true)],
+      ['play', play],
       ['pause', control(false)],
     ];
     for (const [action, handler] of actions)
@@ -540,7 +588,9 @@ export default function Player({
             if (media && videoRef.current?.getAttribute('src')) {
               setLoading(false);
               setError(
-                'This media couldn’t load. Use a direct, publicly accessible video or audio link supported by your browser.',
+                local
+                  ? 'Your browser can’t play this file. MP4, WebM, MP3, and M4A work almost everywhere.'
+                  : 'This media couldn’t load. Use a direct, publicly accessible video or audio link supported by your browser.',
               );
             }
           }}
@@ -584,7 +634,7 @@ export default function Player({
             <span>Good taste is better shared.</span>
           </div>
         )}
-        {!!media && !playback.playing && !error && !loading && (
+        {!!media && !playback.playing && !error && !loading && !needsFile && (
           <button
             className="center-play"
             onClick={toggle}
@@ -618,7 +668,32 @@ export default function Player({
             )}
           </div>
         )}
-        {blocked && !error && (
+        {local && needsFile && (
+          <div className="player-error">
+            <Film size={28} />
+            <h3>This one plays from your own device.</h3>
+            <p>
+              Choose “{local.name}” on this device to watch along. Nothing is uploaded, and it stays
+              in sync with everyone.
+            </p>
+            <label className="button secondary">
+              Choose the file
+              <input
+                type="file"
+                accept="video/*,audio/*"
+                hidden
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file || !media) return;
+                  if (file.size !== local.size)
+                    notify('That file is a different size from the room’s, so it may not line up.');
+                  chooseLocal(media.url, file);
+                }}
+              />
+            </label>
+          </div>
+        )}
+        {blocked && !error && !needsFile && (
           <button className="autoplay-prompt" onClick={toggle}>
             <Play size={16} />
             Tap to join playback on this device

@@ -175,6 +175,14 @@ test('chat messages and reactions arrive only inside the same room', async () =>
   assert.equal((await emit(host, 'chat:send', { text: 'x'.repeat(1501) })).ok, false);
   assert.equal((await emit(host, 'chat:send', { text: '   ' })).ok, false);
 });
+test("a file played from each person's device is queued by name and size; other links are refused", async () => {
+  const { host, room } = await setup();
+  const local = { title: 'Holiday', url: 'local:holiday%20clip.mp4#734003200', kind: 'video' };
+  assert.equal((await emit(host, 'media:add', local)).ok, true);
+  assert.equal(service.rooms.get(room.code).playlist[0].url, local.url);
+  for (const url of ['local:holiday.mp4', 'file:///C:/holiday.mp4', 'javascript:alert(1)'])
+    assert.equal((await emit(host, 'media:add', { ...local, url })).ok, false);
+});
 test('queue updates select and remove media without retaining an old playback clock', async () => {
   const { host, room } = await setup();
   await emit(host, 'media:add', movie);
