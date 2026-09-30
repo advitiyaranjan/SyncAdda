@@ -9,7 +9,7 @@ async function enter(page: Page, url: string | null, name: string) {
     await page.getByLabel('Your name').fill(name);
     await page.getByRole('button', { name: 'Let me in' }).click();
   } else {
-    await page.goto('/');
+    await page.goto(process.env.SYNCADDA_URL || '/');
     await page.getByRole('button', { name: 'Create a room', exact: true }).first().click();
     await page.getByLabel('Your name').fill(name);
     await page.getByRole('button', { name: 'Create my room' }).click();

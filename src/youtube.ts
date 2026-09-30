@@ -31,6 +31,7 @@ type YTNamespace = {
         onStateChange: (event: { data: number }) => void;
         onError: (event: { data: number }) => void;
         onPlaybackRateChange: (event: { data: number }) => void;
+        onAutoplayBlocked: () => void;
       };
     },
   ) => YTPlayer;
@@ -110,17 +111,23 @@ export async function createYouTubeEngine(
   videoId: string,
   on: {
     ready: (engine: YouTubeEngine) => void;
-    state: (state: number) => void;
+    state: (state: number, automatic: boolean) => void;
+    blocked: () => void;
     error: (code: number) => void;
   },
+  signal?: AbortSignal,
 ): Promise<YouTubeEngine> {
   const YT = await loadYouTube();
+  if (signal?.aborted) throw new DOMException('Player was removed.', 'AbortError');
   // YouTube replaces the element it is given, so hand it a child React doesn't own.
   const mount = document.createElement('div');
   host.replaceChildren(mount);
   let ready = false;
   // Where a cued (not yet started) video will begin; getCurrentTime() is unreliable until then.
   let cuedAt: number | null = 0;
+  let seekPending: { position: number; at: number } | null = null;
+  let pausePending = false;
+  let autoplayBlocked = false;
   // The room's speed. YouTube resets to 1x whenever it (re)loads the video, so it's re-applied.
   let desiredRate = 1;
   let captionsOff = false;
@@ -131,6 +138,16 @@ export async function createYouTubeEngine(
   const state = () => player.getPlayerState();
   const active = () => state() === YT_STATE.PLAYING || state() === YT_STATE.BUFFERING;
   const idle = () => [YT_STATE.UNSTARTED, YT_STATE.CUED, YT_STATE.ENDED].includes(state());
+  const seeking = () => {
+    if (seekPending && state() !== YT_STATE.BUFFERING && !idle()) {
+      if (
+        Math.abs(player.getCurrentTime() - seekPending.position) < 1 ||
+        Date.now() - seekPending.at > 10_000
+      )
+        seekPending = null;
+    }
+    return seekPending !== null;
+  };
   const player: YTPlayer = new YT.Player(mount, {
     videoId,
     width: '100%',
@@ -151,8 +168,12 @@ export async function createYouTubeEngine(
         on.ready(engine);
       },
       onStateChange: ({ data }) => {
-        if (data === YT_STATE.PLAYING || data === YT_STATE.BUFFERING) {
+        const automatic = !!pending || !!seekPending || (pausePending && data === YT_STATE.PAUSED);
+        if (data === YT_STATE.PAUSED) pausePending = false;
+        if (data === YT_STATE.PLAYING) {
           cuedAt = null;
+          autoplayBlocked = false;
+          seeking();
           pending?.done(true);
         }
         if (data === YT_STATE.PLAYING) {
@@ -165,7 +186,7 @@ export async function createYouTubeEngine(
             player.unloadModule('cc');
           }
         }
-        on.state(data);
+        on.state(data, automatic);
       },
       onPlaybackRateChange: () => {
         if (state() === YT_STATE.PLAYING) keepRate();
@@ -174,18 +195,31 @@ export async function createYouTubeEngine(
         pending?.done(false);
         on.error(data);
       },
+      onAutoplayBlocked: () => {
+        autoplayBlocked = true;
+        pending?.done(false);
+        on.blocked();
+      },
     },
   });
   const engine: YouTubeEngine = {
     nudges: false,
     ready: () => ready,
+    syncing: () =>
+      !autoplayBlocked && (!!pending || state() === YT_STATE.BUFFERING || (seeking() && !idle())),
     duration: () => {
       const duration = player.getDuration();
       return duration > 0 ? duration : NaN;
     },
     seekable: () => null,
-    time: () => (cuedAt !== null && idle() ? cuedAt : player.getCurrentTime()),
+    time: () =>
+      seeking()
+        ? seekPending!.position
+        : cuedAt !== null && idle()
+          ? cuedAt
+          : player.getCurrentTime(),
     seek(seconds) {
+      seekPending = { position: seconds, at: Date.now() };
       // Seeking a cued or ended video starts playback, so re-cue it at the new spot instead.
       if (idle()) {
         cuedAt = seconds;
@@ -197,23 +231,31 @@ export async function createYouTubeEngine(
       desiredRate = rate;
       player.setPlaybackRate(rate);
     },
-    paused: () => !active(),
+    paused: () => autoplayBlocked || !active(),
     ended: () => state() === YT_STATE.ENDED,
     play() {
-      if (active()) return Promise.resolve();
+      if (pending) return pending.promise;
+      if (!autoplayBlocked && state() === YT_STATE.PLAYING) return Promise.resolve();
+      autoplayBlocked = false;
+      pausePending = false;
       if (!pending) {
         let resolve!: () => void, reject!: (error: Error) => void;
         const promise = new Promise<void>((a, b) => {
           resolve = a;
           reject = b;
         });
-        // YouTube gives no signal when the browser blocks autoplay; treat "never started" as blocked.
-        const timer = window.setTimeout(() => pending?.done(false), 3000);
+        // Older embeds may omit onAutoplayBlocked. Buffering is not a playback failure.
+        const check = () => {
+          if (!pending) return;
+          if (state() === YT_STATE.BUFFERING) pending.timer = window.setTimeout(check, 8000);
+          else pending.done(state() === YT_STATE.PLAYING);
+        };
+        const timer = window.setTimeout(check, 8000);
         pending = {
           promise,
           timer,
           done(ok) {
-            clearTimeout(timer);
+            if (pending) clearTimeout(pending.timer);
             pending = null;
             if (ok) resolve();
             else reject(new Error('Playback was blocked.'));
@@ -224,17 +266,20 @@ export async function createYouTubeEngine(
       player.playVideo();
       return promise;
     },
-    pause: () => player.pauseVideo(),
+    pause: () => {
+      pausePending = true;
+      pending?.done(false);
+      player.pauseVideo();
+    },
     setVolume(volume, muted) {
       player.setVolume(Math.round(volume * 100));
       if (muted) player.mute();
       else player.unMute();
     },
     destroy() {
-      if (pending) clearTimeout(pending.timer);
-      pending = null;
+      pending?.done(false);
       player.destroy();
-      host.replaceChildren();
+      mount.remove();
     },
   };
   return engine;

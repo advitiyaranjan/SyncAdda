@@ -36,6 +36,8 @@ export type Identity = { id: string; token: string; name: string };
 export type Engine = {
   nudges: boolean;
   ready(): boolean;
+  // A remote seek or startup is still settling; don't interrupt it with drift corrections.
+  syncing?(): boolean;
   duration(): number;
   seekable(): [number, number] | null;
   time(): number;

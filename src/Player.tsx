@@ -78,7 +78,13 @@ export default function Player({
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(0.8);
   const [muted, setMuted] = useState(false);
-  const [blocked, setBlocked] = useState(false);
+  const [blocked, setBlockedState] = useState(false);
+  const blockedRef = useRef(false);
+  const playAttempt = useRef<Engine | null>(null);
+  const setBlocked = useCallback((value: boolean) => {
+    blockedRef.current = value;
+    setBlockedState(value);
+  }, []);
   const [controlsHidden, setControlsHidden] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -127,7 +133,7 @@ export default function Player({
   const apply = useCallback(() => {
     const engine = engineRef.current,
       target = state.current;
-    if (!engine || !engine.ready()) return;
+    if (!engine || !engine.ready() || (blockedRef.current && target.playing)) return;
     let targetTime =
       target.position +
       (target.playing
@@ -138,16 +144,12 @@ export default function Player({
     if (Number.isFinite(duration)) targetTime = Math.min(targetTime, duration);
     else if (range) targetTime = Math.max(range[0], Math.min(targetTime, range[1]));
     let drift = targetTime - engine.time();
-    // Big gaps jump straight to the shared position. YouTube can't fine-tune its speed, so it
-    // jumps at a smaller gap; seeking rebuffers, so small gaps are closed by speed instead.
-    // After a jump, give the player a moment to buffer before jumping again.
-    const settled = Date.now() - lastSeek.current > 2000;
-    if (
-      (settled && Math.abs(drift) > (engine.nudges ? 1 : 0.5)) ||
-      (!target.playing && Math.abs(drift) > 0.1)
-    ) {
-      engine.seek(targetTime);
+    // Correct large gaps, but let an outstanding startup or seek finish first. YouTube
+    // needs a wider tolerance because each correction can rebuffer on a phone.
+    const settled = !engine.syncing?.() && Date.now() - lastSeek.current > 2500;
+    if (settled && Math.abs(drift) > (target.playing ? (engine.nudges ? 1 : 1.25) : 0.1)) {
       lastSeek.current = Date.now();
+      engine.seek(targetTime);
       drift = 0;
     }
     // Speed up or slow down slightly in proportion to the gap (closing it over about 3 seconds,
@@ -159,12 +161,20 @@ export default function Player({
         : 0;
     const rate = target.rate * (1 + correction);
     if (Math.abs(engine.rate() - rate) > 0.004) engine.setRate(rate);
-    if (target.playing && engine.paused() && !engine.ended())
+    if (target.playing && engine.paused() && !engine.ended() && playAttempt.current !== engine) {
+      playAttempt.current = engine;
       engine
         .play()
-        .then(() => setBlocked(false))
-        .catch(() => setBlocked(true));
-    else if (!target.playing && !engine.paused()) engine.pause();
+        .then(() => {
+          if (engineRef.current === engine) setBlocked(false);
+        })
+        .catch(() => {
+          if (engineRef.current === engine && state.current.playing) setBlocked(true);
+        })
+        .finally(() => {
+          if (playAttempt.current === engine) playAttempt.current = null;
+        });
+    } else if (!target.playing && !engine.paused()) engine.pause();
   }, []);
   useEffect(() => {
     state.current = room.playback;
@@ -233,38 +243,51 @@ export default function Player({
     setCurrentTime(0);
     setBlocked(false);
     setLoading(!!media);
+    lastSeek.current = 0;
+    playAttempt.current = null;
     engineRef.current = null;
     const host = youtubeRef.current;
     if (!el || !host || !media) return;
+    const controller = new AbortController();
     let hls: Hls | undefined,
       youtube: YouTubeEngine | undefined,
       poll: ReturnType<typeof setInterval> | undefined,
       disposed = false;
     if (!videoId) engineRef.current = videoEngine(el);
     if (videoId) {
-      createYouTubeEngine(host, videoId, {
-        ready: (engine) => {
-          if (disposed) return;
-          engineRef.current = engine;
-          engine.setVolume(volumeRef.current.volume, volumeRef.current.muted);
-          setLoading(false);
-          apply();
+      createYouTubeEngine(
+        host,
+        videoId,
+        {
+          ready: (engine) => {
+            if (disposed) return;
+            engineRef.current = engine;
+            engine.setVolume(volumeRef.current.volume, volumeRef.current.muted);
+            setLoading(false);
+            apply();
+          },
+          state: (value, automatic) => {
+            if (disposed) return;
+            if (value === YT_STATE.BUFFERING) setLoading(true);
+            else setLoading(false);
+            if (value === YT_STATE.PLAYING) setBlocked(false);
+            if (value === YT_STATE.ENDED) endedRef.current();
+            if (!automatic && (value === YT_STATE.PLAYING || value === YT_STATE.PAUSED))
+              youtubeActionRef.current(value);
+          },
+          blocked: () => {
+            if (disposed) return;
+            setLoading(false);
+            setBlocked(true);
+          },
+          error: (code) => {
+            if (disposed) return;
+            setLoading(false);
+            setError(youtubeError(code));
+          },
         },
-        state: (value) => {
-          if (disposed) return;
-          if (value === YT_STATE.BUFFERING) setLoading(true);
-          else setLoading(false);
-          if (value === YT_STATE.PLAYING) setBlocked(false);
-          if (value === YT_STATE.ENDED) endedRef.current();
-          if (value === YT_STATE.PLAYING || value === YT_STATE.PAUSED)
-            youtubeActionRef.current(value);
-        },
-        error: (code) => {
-          if (disposed) return;
-          setLoading(false);
-          setError(youtubeError(code));
-        },
-      })
+        controller.signal,
+      )
         .then((engine) => {
           if (disposed) engine.destroy();
           else youtube = engine;
@@ -323,6 +346,7 @@ export default function Player({
       clearTimeout(seekTimer.current);
       clearInterval(poll);
       disposed = true;
+      controller.abort();
       engineRef.current = null;
       hls?.destroy();
       youtube?.destroy();
@@ -390,6 +414,7 @@ export default function Player({
   function seek(value: number) {
     if (!canControl) return;
     state.current = { ...state.current, position: value, updatedAt: Date.now() + offset.current };
+    lastSeek.current = Date.now();
     engineRef.current?.seek(value);
     setCurrentTime(value);
     clearTimeout(seekTimer.current);
@@ -401,9 +426,14 @@ export default function Player({
     if (!media) return;
     if (blocked) {
       try {
+        setBlocked(false);
+        // Catch up once in this gesture, then let YouTube finish starting before correcting again.
+        lastSeek.current = 0;
+        apply();
         await engineRef.current?.play();
         setBlocked(false);
       } catch {
+        setBlocked(true);
         notify('Your browser could not play this source. Try another media link.');
       }
       return;
