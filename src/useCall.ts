@@ -1,26 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { request, socket } from './lib';
+import { callState, request, socket } from './lib';
 import type { Person } from './types';
 
 type Peer = {
   pc: RTCPeerConnection;
-  makingOffer: boolean;
-  ignoreOffer: boolean;
-  settingAnswer: boolean;
+  // Exactly one side of each pair (the smaller id) makes offers. When both sides offered at
+  // once, each added its own audio/video transceivers and tiles could end up showing a dead track.
+  offerer: boolean;
   pending: RTCIceCandidateInit[];
   stream: MediaStream;
 };
+// A signal with neither field is a "hello": the answerer opened a fresh connection and wants an offer.
 type Signal = {
   from: string;
   description?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
 };
-export function useCall(
-  myId: string,
-  people: Person[],
-  connected: boolean,
-  notify: (message: string) => void,
-) {
+export function useCall(myId: string, people: Person[], notify: (message: string) => void) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [streams, setStreams] = useState<Record<string, MediaStream>>({});
   const [inCall, setInCall] = useState(false);
@@ -31,6 +27,7 @@ export function useCall(
   const active = useRef(false);
   const stream = useRef(new MediaStream());
   const peers = useRef(new Map<string, Peer>());
+  const offline = useRef(new Set<string>());
   const configuration = useRef<RTCConfiguration>({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   });
@@ -50,10 +47,15 @@ export function useCall(
     const nextCamera =
       active.current &&
       stream.current.getVideoTracks().some((t) => t.enabled && t.readyState === 'live');
-    setInCall(active.current);
     setMic(nextMic);
     setCamera(nextCamera);
-    await request('call:status', { inCall: active.current, mic: nextMic, camera: nextCamera });
+    Object.assign(callState, { inCall: active.current, mic: nextMic, camera: nextCamera });
+    try {
+      await request('call:status', { ...callState });
+    } finally {
+      // Connect to peers only once the server knows we're in the call; it drops signals before that.
+      setInCall(active.current);
+    }
   }, []);
   const closePeers = useCallback(() => {
     for (const peer of peers.current.values()) peer.pc.close();
@@ -71,84 +73,110 @@ export function useCall(
     setMic(false);
     setCamera(false);
     closePeers();
+    Object.assign(callState, { inCall: false, mic: false, camera: false });
     if (socket.connected)
       request('call:status', { inCall: false, mic: false, camera: false }).catch(() => {});
   }, [closePeers]);
-  const ensurePeer = useCallback((id: string): Peer => {
-    const existing = peers.current.get(id);
-    if (existing) return existing;
-    const pc = new RTCPeerConnection(configuration.current);
-    const peer: Peer = {
-      pc,
-      makingOffer: false,
-      ignoreOffer: false,
-      settingAnswer: false,
-      pending: [],
-      stream: new MediaStream(),
-    };
-    peers.current.set(id, peer);
-    pc.onicecandidate = ({ candidate }) => {
-      if (candidate)
-        request('call:signal', { to: id, candidate: candidate.toJSON() }).catch(() => {});
-    };
-    pc.ontrack = ({ track }) => {
-      peer.stream.addTrack(track);
-      setStreams((previous) => ({ ...previous, [id]: new MediaStream(peer.stream.getTracks()) }));
-    };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed') {
-        setFailedPeers((previous) => (previous.includes(id) ? previous : [...previous, id]));
-        pc.restartIce();
-      } else if (pc.connectionState === 'connected')
-        setFailedPeers((previous) => previous.filter((p) => p !== id));
-    };
-    pc.onnegotiationneeded = async () => {
-      try {
-        peer.makingOffer = true;
-        await pc.setLocalDescription();
-        if (pc.localDescription)
-          await request('call:signal', { to: id, description: pc.localDescription.toJSON() });
-      } catch {
-        if (pc.connectionState !== 'closed')
-          setFailedPeers((previous) => (previous.includes(id) ? previous : [...previous, id]));
-      } finally {
-        peer.makingOffer = false;
-      }
-    };
-    for (const kind of ['audio', 'video'] as const) {
-      const track = stream.current.getTracks().find((t) => t.kind === kind);
-      pc.addTransceiver(track || kind, { direction: 'sendrecv', streams: [stream.current] });
-    }
-    return peer;
+  const dropPeer = useCallback((id: string) => {
+    peers.current.get(id)?.pc.close();
+    peers.current.delete(id);
+    setStreams((previous) => {
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+    setFailedPeers((previous) => previous.filter((p) => p !== id));
   }, []);
-  useEffect(() => {
-    const signal = async ({ from, description, candidate }: Signal) => {
-      if (!active.current) return;
-      const peer = ensurePeer(from),
-        pc = peer.pc;
-      try {
-        if (description) {
-          const readyForOffer =
-            !peer.makingOffer && (pc.signalingState === 'stable' || peer.settingAnswer);
-          const collision = description.type === 'offer' && !readyForOffer;
-          peer.ignoreOffer = myId < from && collision;
-          if (peer.ignoreOffer) return;
-          peer.settingAnswer = description.type === 'answer';
-          await pc.setRemoteDescription(description);
-          peer.settingAnswer = false;
-          for (const queued of peer.pending.splice(0)) await pc.addIceCandidate(queued);
-          if (description.type === 'offer') {
+  const ensurePeer = useCallback(
+    (id: string, { announce = false } = {}): Peer => {
+      const existing = peers.current.get(id);
+      if (existing) return existing;
+      const pc = new RTCPeerConnection(configuration.current);
+      const peer: Peer = { pc, offerer: myId < id, pending: [], stream: new MediaStream() };
+      peers.current.set(id, peer);
+      pc.onicecandidate = ({ candidate }) => {
+        if (candidate)
+          request('call:signal', { to: id, candidate: candidate.toJSON() }).catch(() => {});
+      };
+      pc.ontrack = ({ track }) => {
+        peer.stream.addTrack(track);
+        setStreams((previous) => ({ ...previous, [id]: new MediaStream(peer.stream.getTracks()) }));
+      };
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed') {
+          setFailedPeers((previous) => (previous.includes(id) ? previous : [...previous, id]));
+          if (peer.offerer) pc.restartIce();
+        } else if (pc.connectionState === 'connected')
+          setFailedPeers((previous) => previous.filter((p) => p !== id));
+      };
+      if (peer.offerer) {
+        pc.onnegotiationneeded = async () => {
+          try {
             await pc.setLocalDescription();
             if (pc.localDescription)
-              await request('call:signal', { to: from, description: pc.localDescription.toJSON() });
+              await request('call:signal', { to: id, description: pc.localDescription.toJSON() });
+          } catch {
+            if (pc.connectionState !== 'closed')
+              setFailedPeers((previous) => (previous.includes(id) ? previous : [...previous, id]));
           }
-        } else if (candidate && !peer.ignoreOffer) {
-          if (pc.remoteDescription) await pc.addIceCandidate(candidate);
+        };
+        for (const kind of ['audio', 'video'] as const) {
+          const track = stream.current.getTracks().find((t) => t.kind === kind);
+          pc.addTransceiver(track || kind, { direction: 'sendrecv', streams: [stream.current] });
+        }
+      } else if (announce) request('call:signal', { to: id }).catch(() => {});
+      return peer;
+    },
+    [myId],
+  );
+  useEffect(() => {
+    const accept = async (from: string, peer: Peer, description: RTCSessionDescriptionInit) => {
+      const pc = peer.pc;
+      await pc.setRemoteDescription(description);
+      for (const queued of peer.pending.splice(0)) await pc.addIceCandidate(queued).catch(() => {});
+      if (description.type !== 'offer') return;
+      // Answer with our current tracks on the transceivers the offer created.
+      for (const transceiver of pc.getTransceivers()) {
+        const kind = transceiver.receiver.track.kind;
+        const track =
+          stream.current.getTracks().find((t) => t.kind === kind && t.readyState === 'live') ||
+          null;
+        transceiver.direction = 'sendrecv';
+        if (transceiver.sender.track !== track) await transceiver.sender.replaceTrack(track);
+      }
+      await pc.setLocalDescription();
+      if (pc.localDescription)
+        await request('call:signal', { to: from, description: pc.localDescription.toJSON() });
+    };
+    const signal = async ({ from, description, candidate }: Signal) => {
+      if (!active.current) return;
+      let peer = peers.current.get(from);
+      if (!description && !candidate) {
+        if (myId > from) return;
+        // Our connection belongs to an earlier session of theirs (e.g. they reloaded): start over.
+        if (peer?.pc.remoteDescription) dropPeer(from);
+        ensurePeer(from);
+        return;
+      }
+      peer ??= ensurePeer(from);
+      try {
+        if (description) {
+          if (description.type === 'offer' && peer.offerer) return;
+          try {
+            await accept(from, peer, description);
+          } catch (error) {
+            if (description.type !== 'offer') throw error;
+            // An offer from their new session can't be applied to our old connection.
+            dropPeer(from);
+            peer = ensurePeer(from);
+            await accept(from, peer, description);
+          }
+        } else if (candidate) {
+          if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(candidate);
           else peer.pending.push(candidate);
         }
       } catch {
-        peer.settingAnswer = false;
-        if (!peer.ignoreOffer && pc.connectionState !== 'closed')
+        if (peer.pc.connectionState !== 'closed')
           setFailedPeers((previous) => (previous.includes(from) ? previous : [...previous, from]));
       }
     };
@@ -156,32 +184,37 @@ export function useCall(
     return () => {
       socket.off('call:signal', signal);
     };
-  }, [myId, ensurePeer]);
+  }, [myId, ensurePeer, dropPeer]);
   useEffect(() => {
     if (!inCall) return;
-    const present = people.filter((p) => p.id !== myId && p.inCall && p.online);
-    for (const p of present) ensurePeer(p.id);
-    for (const [id, peer] of peers.current)
-      if (!present.some((p) => p.id === id)) {
-        peer.pc.close();
-        peers.current.delete(id);
-        setStreams((previous) => {
-          const next = { ...previous };
-          delete next[id];
-          return next;
-        });
+    // Keep connections to people who are briefly offline; their media flows peer-to-peer meanwhile.
+    const present = people.filter((p) => p.id !== myId && p.inCall);
+    for (const p of present) {
+      if (!p.online) {
+        offline.current.add(p.id);
+        continue;
       }
-  }, [people, myId, inCall, ensurePeer]);
-  useEffect(() => {
-    if (!connected && active.current) {
-      leave();
-      notify('Your call disconnected. Rejoin when the room reconnects.');
+      const back = offline.current.delete(p.id);
+      const peer = ensurePeer(p.id, { announce: true });
+      // A restart attempted while they were offline couldn't reach them; try again now.
+      if (back && peer.offerer && peer.pc.connectionState !== 'connected') peer.pc.restartIce();
     }
-  }, [connected, leave, notify]);
+    for (const id of [...peers.current.keys()]) if (!present.some((p) => p.id === id)) dropPeer(id);
+  }, [people, myId, inCall, ensurePeer, dropPeer]);
+  useEffect(() => {
+    // The room connection drops now and then (hosting limits connections to about 5 minutes).
+    // Calls are peer-to-peer, so they keep going; App re-sends our call status when it rejoins.
+    const hide = () => {
+      if (active.current) socket.emit('call:status', { inCall: false, mic: false, camera: false });
+    };
+    window.addEventListener('pagehide', hide);
+    return () => window.removeEventListener('pagehide', hide);
+  }, []);
   useEffect(
     () => () => {
       generation.current++;
       active.current = false;
+      Object.assign(callState, { inCall: false, mic: false, camera: false });
       stream.current.getTracks().forEach((t) => t.stop());
       for (const peer of peers.current.values()) peer.pc.close();
       peers.current.clear();

@@ -9,6 +9,8 @@ export const socket = io({
   reconnectionDelay: 500,
   reconnectionDelayMax: 4000,
 });
+// Our call status, re-sent when rejoining after a dropped connection so the call carries on.
+export const callState = { inCall: false, mic: false, camera: false };
 export async function request<T = Record<string, never>>(
   event: string,
   data: unknown = {},

@@ -1,8 +1,9 @@
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { z } from 'zod';
-import { positionAt } from './rooms.js';
+import { callSchema, positionAt } from './rooms.js';
+import { deleteUploads, droppedUploads, sameSecret } from './uploads.js';
 
 const identitySchema = z.object({
   id: z.string().uuid(),
@@ -22,14 +23,20 @@ const mediaSchema = z.object({
 const key = (code) => `syncadda:room:${code}`;
 const lockKey = (code) => `syncadda:lock:${code}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const sameSecret = (a, b) =>
-  typeof a === 'string' && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+export async function isRoomMember(redis, code, id, token) {
+  if (!codeSchema.safeParse(code).success || typeof id !== 'string') return false;
+  const json = await redis.get(key(code));
+  const person = json ? JSON.parse(json).people[id] : null;
+  return !!person && sameSecret(person.token, token);
+}
 
 export async function attachRedisRooms(
   io,
   {
     redisUrl = process.env.REDIS_URL || process.env.KV_URL,
     graceMs = 90_000,
+    callGraceMs = 15_000,
     RedisClass = Redis,
   } = {},
 ) {
@@ -75,9 +82,14 @@ export async function attachRedisRooms(
     }
   };
   const prune = (room) => {
-    for (const person of Object.values(room.people))
-      if (!person.online && person.offlineSince && Date.now() - person.offlineSince >= graceMs)
-        remove(room, person.id);
+    for (const person of Object.values(room.people)) {
+      if (person.online || !person.offlineSince) continue;
+      const away = Date.now() - person.offlineSince;
+      if (away >= graceMs) remove(room, person.id);
+      // If they don't come back quickly (e.g. closed the tab), they're no longer in the call.
+      else if (away >= callGraceMs)
+        Object.assign(person, { inCall: false, mic: false, camera: false });
+    }
   };
   async function mutate(code, handler) {
     const token = randomUUID();
@@ -90,16 +102,20 @@ export async function attachRedisRooms(
       await sleep(20);
     }
     if (!acquired) throw new Error('This room is busy. Please try again.');
+    let result,
+      dropped = [];
     try {
       const room = await read(code);
       if (!room)
         throw new Error('That room could not be found. Check the code or create a new one.');
       prune(room);
+      const before = [...room.playlist];
       const value = await handler(room);
-      if (Object.keys(room.people).length)
-        await redis.set(key(code), JSON.stringify(room), 'EX', 6 * 3600);
+      const open = Object.keys(room.people).length > 0;
+      if (open) await redis.set(key(code), JSON.stringify(room), 'EX', 6 * 3600);
       else await redis.del(key(code));
-      return { value, room };
+      dropped = droppedUploads(before, open ? room.playlist : []);
+      result = { value, room };
     } finally {
       await redis.eval(
         "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end",
@@ -108,30 +124,42 @@ export async function attachRedisRooms(
         token,
       );
     }
+    await deleteUploads(dropped);
+    return result;
   }
   io.on('connection', (socket) => {
     let windowStart = Date.now(),
-      count = 0;
+      count = 0,
+      signals = 0,
+      signalQueue = Promise.resolve();
     const event = (name, handler) =>
-      socket.on(name, async (data, ack) => {
+      socket.on(name, (data, ack) => {
         const reply = typeof ack === 'function' ? ack : () => {};
-        try {
-          if (Date.now() - windowStart > 10_000) {
-            windowStart = Date.now();
-            count = 0;
+        const run = async () => {
+          try {
+            if (Date.now() - windowStart > 10_000) {
+              windowStart = Date.now();
+              count = 0;
+              signals = 0;
+            }
+            // Call setup sends a burst of ICE candidates per peer, so it gets its own budget.
+            if (name === 'call:signal' ? ++signals > 800 : ++count > 140)
+              throw new Error('A little too fast. Please try again in a moment.');
+            const result = await handler(data);
+            reply({ ok: true, ...result });
+          } catch (error) {
+            reply({
+              ok: false,
+              error:
+                error instanceof z.ZodError
+                  ? 'Please check your details and try again.'
+                  : error.message || 'Something went wrong.',
+            });
           }
-          if (++count > 140) throw new Error('A little too fast. Please try again in a moment.');
-          const result = await handler(data);
-          reply({ ok: true, ...result });
-        } catch (error) {
-          reply({
-            ok: false,
-            error:
-              error instanceof z.ZodError
-                ? 'Please check your details and try again.'
-                : error.message || 'Something went wrong.',
-          });
-        }
+        };
+        // Relay call signals in the order they were sent; WebRTC negotiation depends on it.
+        if (name === 'call:signal') signalQueue = signalQueue.then(run);
+        else void run();
       });
     const current = async (hostOnly = false, control = false) => {
       const code = socket.data.code,
@@ -212,7 +240,9 @@ export async function attachRedisRooms(
       return { room: snapshot(room) };
     });
     event('room:join', async (data) => {
-      const input = z.object({ code: codeSchema, identity: identitySchema }).parse(data);
+      const input = z
+        .object({ code: codeSchema, identity: identitySchema, call: callSchema })
+        .parse(data);
       if (socket.data.code && socket.data.code !== input.code)
         throw new Error('Leave your current room first.');
       const { value: oldSocketId, room } = await mutate(input.code, (room) => {
@@ -230,9 +260,7 @@ export async function attachRedisRooms(
           ...input.identity,
           socketId: socket.id,
           online: true,
-          mic: false,
-          camera: false,
-          inCall: false,
+          ...input.call,
         };
         if (!existing) system(room, `${input.identity.name} joined. Make yourself at home!`);
         return oldId;
@@ -437,13 +465,8 @@ export async function attachRedisRooms(
         const { room } = await mutate(code, (room) => {
           const person = room.people[id];
           if (!person || person.socketId !== socket.id) return;
-          Object.assign(person, {
-            online: false,
-            inCall: false,
-            mic: false,
-            camera: false,
-            offlineSince: Date.now(),
-          });
+          // Call status is kept: the call is peer-to-peer and survives a brief reconnect.
+          Object.assign(person, { online: false, offlineSince: Date.now() });
           if (room.hostId === id) {
             const successor = Object.values(room.people).find((p) => p.online);
             if (successor) {
@@ -453,17 +476,22 @@ export async function attachRedisRooms(
           }
         });
         if (Object.keys(room.people).length) broadcast(room);
-        const timer = setTimeout(async () => {
-          timers.delete(socket.id);
-          try {
-            const { room } = await mutate(code, (room) => prune(room));
-            if (Object.keys(room.people).length) broadcast(room);
-          } catch {
-            /* room closed */
-          }
-        }, graceMs);
-        timer.unref();
-        timers.set(socket.id, timer);
+        for (const [name, ms] of [
+          [socket.id, graceMs],
+          [`${socket.id}:call`, callGraceMs],
+        ]) {
+          const timer = setTimeout(async () => {
+            timers.delete(name);
+            try {
+              const { room } = await mutate(code, (room) => prune(room));
+              if (Object.keys(room.people).length) broadcast(room);
+            } catch {
+              /* room closed */
+            }
+          }, ms);
+          timer.unref();
+          timers.set(name, timer);
+        }
       } catch (error) {
         if (!String(error?.message).includes('room could not be found'))
           console.error('Could not save disconnected room state:', error);

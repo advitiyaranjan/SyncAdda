@@ -4,6 +4,7 @@ import { Server } from 'socket.io';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachRooms } from './rooms.js';
+import { sameSecret, uploadHandler } from './uploads.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -27,7 +28,13 @@ const io = new Server(server, {
     cb(null, allowed);
   },
 });
-attachRooms(io);
+const { rooms } = attachRooms(io);
+app.post('/api/upload', express.json(), (req, res) =>
+  uploadHandler(req, res, (code, id, token) => {
+    const person = rooms.get(code)?.people.get(id);
+    return !!person && sameSecret(person.token, token);
+  }),
+);
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 app.get('/api/ice', (_req, res) => {
   let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { deleteUploads, droppedUploads } from './uploads.js';
 
 const identity = z.object({
   id: z.string().uuid(),
@@ -7,6 +8,12 @@ const identity = z.object({
   name: z.string().trim().min(1).max(24),
 });
 const codeSchema = z.string().regex(/^[A-Z2-9]{6}$/);
+const offCall = { inCall: false, mic: false, camera: false };
+// Sent when rejoining after a dropped connection, so an ongoing call isn't reset.
+export const callSchema = z
+  .object({ inCall: z.boolean(), mic: z.boolean(), camera: z.boolean() })
+  .transform((call) => (call.inCall ? call : offCall))
+  .default(offCall);
 const mediaSchema = z.object({
   title: z.string().trim().min(1).max(100),
   url: z
@@ -19,7 +26,7 @@ const mediaSchema = z.object({
 export const positionAt = (playback, now = Date.now()) =>
   playback.position +
   (playback.playing ? (Math.max(0, now - playback.updatedAt) / 1000) * playback.rate : 0);
-export function attachRooms(io, { graceMs = 90_000 } = {}) {
+export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {}) {
   const rooms = new Map();
   const timers = new Set();
   const creationLimits = new Map();
@@ -44,6 +51,7 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
     system(room, `${person.name} left the room.`);
     if (!room.people.size) {
       rooms.delete(room.code);
+      void deleteUploads(droppedUploads(room.playlist, []));
       return;
     }
     if (room.hostId === id) {
@@ -56,7 +64,8 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
   };
   io.on('connection', (socket) => {
     let windowStart = Date.now(),
-      count = 0;
+      count = 0,
+      signals = 0;
     const event = (name, handler) =>
       socket.on(name, async (data, ack) => {
         const reply = typeof ack === 'function' ? ack : () => {};
@@ -64,8 +73,11 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
           if (Date.now() - windowStart > 10_000) {
             windowStart = Date.now();
             count = 0;
+            signals = 0;
           }
-          if (++count > 140) throw new Error('A little too fast. Please try again in a moment.');
+          // Call setup sends a burst of ICE candidates per peer, so it gets its own budget.
+          if (name === 'call:signal' ? ++signals > 800 : ++count > 140)
+            throw new Error('A little too fast. Please try again in a moment.');
           const result = await handler(data);
           reply({ ok: true, ...result });
         } catch (error) {
@@ -86,7 +98,7 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
         throw new Error('Only the host can do that.');
       return room;
     };
-    const join = async (room, user) => {
+    const join = async (room, user, call = offCall) => {
       if (socket.data.code && socket.data.code !== room.code)
         throw new Error('Leave your current room first.');
       const existing = room.people.get(user.id);
@@ -118,9 +130,7 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
         name: user.name,
         socketId: socket.id,
         online: true,
-        mic: false,
-        camera: false,
-        inCall: false,
+        ...call,
       });
       socket.data = { code: room.code, personId: user.id };
       await socket.join(room.code);
@@ -162,11 +172,11 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
       return join(room, input.identity);
     });
     event('room:join', (data) => {
-      const input = z.object({ code: codeSchema, identity }).parse(data);
+      const input = z.object({ code: codeSchema, identity, call: callSchema }).parse(data);
       const room = rooms.get(input.code);
       if (!room)
         throw new Error('That room could not be found. Check the code or create a new one.');
-      return join(room, input.identity);
+      return join(room, input.identity, input.call);
     });
     event('room:leave', async () => {
       const room = current();
@@ -223,6 +233,7 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
         }
       }
       rooms.delete(room.code);
+      void deleteUploads(droppedUploads(room.playlist, []));
     });
     event('chat:send', (data) => {
       const room = current();
@@ -262,7 +273,9 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
     });
     event('media:remove', (data) => {
       const room = current(false, true);
+      const before = room.playlist;
       room.playlist = room.playlist.filter((m) => m.id !== data.id);
+      void deleteUploads(droppedUploads(before, room.playlist));
       if (room.currentId === data.id) {
         room.currentId = room.playlist[0]?.id || null;
         room.playback = { position: 0, playing: false, rate: 1, updatedAt: Date.now() };
@@ -333,13 +346,20 @@ export function attachRooms(io, { graceMs = 90_000 } = {}) {
       const room = rooms.get(socket.data.code),
         person = room?.people.get(socket.data.personId);
       if (!person || person.socketId !== socket.id) return;
+      // Call status is kept: the call is peer-to-peer and survives a brief reconnect.
       person.online = false;
-      person.inCall = false;
-      person.mic = false;
-      person.camera = false;
       person.timer = setTimeout(() => remove(room, person.id), graceMs);
       person.timer.unref();
       timers.add(person.timer);
+      // If they don't come back quickly (e.g. closed the tab), they're no longer in the call.
+      const callTimer = setTimeout(() => {
+        timers.delete(callTimer);
+        if (room.people.get(person.id) !== person || person.online || !person.inCall) return;
+        Object.assign(person, offCall);
+        broadcast(room);
+      }, callGraceMs);
+      callTimer.unref();
+      timers.add(callTimer);
       broadcast(room);
     });
   });

@@ -59,7 +59,7 @@ export default function PersonTile({
         autoPlay
         playsInline
         muted={me || !speakers}
-        className={person.camera && stream ? 'has-camera' : ''}
+        className={`${person.camera && stream ? 'has-camera' : ''} ${me ? 'mirrored' : ''}`}
       />
       {(!person.camera || !stream) && <span className="tile-avatar">{initials(person.name)}</span>}
       <span className="tile-top">

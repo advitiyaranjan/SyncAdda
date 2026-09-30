@@ -24,6 +24,7 @@ import {
   Settings2,
   ShieldCheck,
   Smile,
+  Upload,
   UserPlus,
   Users,
   Video,
@@ -40,6 +41,8 @@ import type { Identity, Room } from './types';
 import Player from './Player';
 import PersonTile from './PersonTile';
 import { useCall } from './useCall';
+import { youtubeId, youtubeTitle } from './youtube';
+import { checkFile, fileTitle, uploadMedia } from './uploads';
 
 export default function WatchRoom({
   room,
@@ -61,7 +64,9 @@ export default function WatchRoom({
   const [panel, setPanel] = useState<'chat' | 'queue' | 'people'>('chat');
   const [mobileView, setMobileView] = useState<'watch' | 'chat' | 'people' | 'call'>('watch');
   const [modal, setModal] = useState<'media' | 'settings' | 'leave' | 'close' | null>(null);
-  const [mediaTab, setMediaTab] = useState<'link' | 'samples'>('link');
+  const [mediaTab, setMediaTab] = useState<'link' | 'file' | 'samples'>('link');
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
   const [mediaTitle, setMediaTitle] = useState('');
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaKind, setMediaKind] = useState<'video' | 'audio'>('video');
@@ -73,8 +78,27 @@ export default function WatchRoom({
   const [speakers, setSpeakers] = useState(true);
   const [expandCall, setExpandCall] = useState(false);
   const [reactions, setReactions] = useState<{ id: string; emoji: string; name: string }[]>([]);
+  const isYouTubeLink = !!youtubeId(mediaUrl.trim());
+  useEffect(() => {
+    const url = mediaUrl.trim();
+    if (!youtubeId(url)) return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      youtubeTitle(url, controller.signal)
+        .then((title) => {
+          if (title) setMediaTitle((current) => current || title);
+        })
+        .catch(() => {
+          /* the viewer can type a title themselves */
+        });
+    }, 300);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [mediaUrl]);
   const chatEnd = useRef<HTMLDivElement>(null);
-  const call = useCall(identity.id, room.participants, connected, notify);
+  const call = useCall(identity.id, room.participants, notify);
   const closeModal = useCallback(() => {
     setModal(null);
     setFormError('');
@@ -135,6 +159,30 @@ export default function WatchRoom({
       setFormError((e as Error).message);
     } finally {
       setBusy(false);
+    }
+  }
+  async function shareFile() {
+    if (!mediaFile || busy) return;
+    if (!canControl) {
+      setFormError('Only the host can add to the queue right now.');
+      return;
+    }
+    setBusy(true);
+    setFormError('');
+    setProgress(0);
+    try {
+      const { url, kind } = await uploadMedia(
+        mediaFile,
+        { code: room.code, id: identity.id, token: identity.token },
+        setProgress,
+      );
+      setMediaFile(null);
+      await addMedia({ title: mediaTitle.trim() || fileTitle(mediaFile), url, kind });
+    } catch (e) {
+      setFormError((e as Error).message);
+      setBusy(false);
+    } finally {
+      setProgress(null);
     }
   }
   const add = () => {
@@ -702,6 +750,16 @@ export default function WatchRoom({
               Paste a link
             </button>
             <button
+              className={mediaTab === 'file' ? 'active' : ''}
+              onClick={() => {
+                setMediaTab('file');
+                setFormError('');
+              }}
+            >
+              <Upload size={15} />
+              From your device
+            </button>
+            <button
               className={mediaTab === 'samples' ? 'active' : ''}
               onClick={() => setMediaTab('samples')}
             >
@@ -713,7 +771,11 @@ export default function WatchRoom({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                void addMedia({ title: mediaTitle.trim(), url: mediaUrl.trim(), kind: mediaKind });
+                void addMedia({
+                  title: mediaTitle.trim(),
+                  url: mediaUrl.trim(),
+                  kind: isYouTubeLink ? 'video' : mediaKind,
+                });
               }}
             >
               <label>
@@ -727,8 +789,8 @@ export default function WatchRoom({
                   required
                 />
                 <small>
-                  Direct MP4, WebM, MP3, or HLS (.m3u8) links. The source must allow playback in
-                  your browser.
+                  YouTube links, or direct MP4, WebM, MP3, or HLS (.m3u8) links. The source must
+                  allow playback in your browser.
                 </small>
               </label>
               <label>
@@ -741,19 +803,22 @@ export default function WatchRoom({
                   maxLength={100}
                 />
               </label>
-              <label>
-                Type
-                <select
-                  value={mediaKind}
-                  onChange={(e) => setMediaKind(e.target.value as 'video' | 'audio')}
-                >
-                  <option value="video">Video / live stream</option>
-                  <option value="audio">Music / audio</option>
-                </select>
-              </label>
+              {!isYouTubeLink && (
+                <label>
+                  Type
+                  <select
+                    value={mediaKind}
+                    onChange={(e) => setMediaKind(e.target.value as 'video' | 'audio')}
+                  >
+                    <option value="video">Video / live stream</option>
+                    <option value="audio">Music / audio</option>
+                  </select>
+                </label>
+              )}
               <p className="source-note">
-                YouTube page links and subscription streaming services aren’t supported. Everyone
-                streams directly from the source.
+                {isYouTubeLink
+                  ? 'Plays in YouTube’s player for everyone. Videos whose owners block embedding won’t play here.'
+                  : 'Subscription streaming services aren’t supported. Everyone streams directly from the source.'}
               </p>
               {formError && (
                 <p className="form-error" role="alert">
@@ -767,6 +832,78 @@ export default function WatchRoom({
                   <>
                     <Plus size={17} />
                     Add to our queue
+                  </>
+                )}
+              </button>
+            </form>
+          ) : mediaTab === 'file' ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void shareFile();
+              }}
+            >
+              <label>
+                Video or song
+                <input
+                  type="file"
+                  accept="video/*,audio/*"
+                  disabled={busy}
+                  required
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] || null;
+                    const problem = file ? checkFile(file) : '';
+                    setFormError(problem);
+                    setMediaFile(problem ? null : file);
+                    if (problem) e.target.value = '';
+                    else if (file) setMediaTitle(fileTitle(file));
+                  }}
+                />
+                <small>
+                  Up to 100 MB. MP4, WebM, MP3, M4A, and other formats your browser can play.
+                </small>
+              </label>
+              <label>
+                Give it a title
+                <input
+                  value={mediaTitle}
+                  onChange={(e) => setMediaTitle(e.target.value)}
+                  placeholder="Something everyone should see"
+                  required
+                  maxLength={100}
+                />
+              </label>
+              <p className="source-note">
+                It’s uploaded once and streamed to everyone in this room, then deleted when it
+                leaves the queue or the room closes.
+              </p>
+              {progress !== null && (
+                <div
+                  className="upload-progress"
+                  role="progressbar"
+                  aria-label="Upload progress"
+                  aria-valuenow={progress}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
+                  <span style={{ width: `${progress}%` }} />
+                </div>
+              )}
+              {formError && (
+                <p className="form-error" role="alert">
+                  {formError}
+                </p>
+              )}
+              <button className="button primary wide" disabled={busy || !mediaFile}>
+                {busy ? (
+                  <>
+                    <LoaderCircle className="spin" size={18} />
+                    {progress !== null ? `Uploading… ${progress}%` : null}
+                  </>
+                ) : (
+                  <>
+                    <Upload size={17} />
+                    Upload and add to our queue
                   </>
                 )}
               </button>

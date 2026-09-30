@@ -29,7 +29,9 @@ Open **http://localhost:5173**. Vite serves the frontend and proxies Socket.IO a
 
 Paste a **direct, publicly accessible** media URL, such as `.mp4`, `.webm`, `.mp3`, or `.m3u8`. Browser codec support still applies. For reliable seeking, file servers must support byte-range requests. HLS sources must allow cross-origin requests. Use HTTPS media on an HTTPS deployment.
 
-The included sample chooser offers **Sintel**, **Big Buck Bunny**, and **Tears of Steel**, open movies by the Blender Foundation, streamed from Google's public sample library. The application does not proxy, upload, or redistribute user media. Regular YouTube pages, DRM-protected sources, and subscription streaming services are not supported.
+The included sample chooser offers **Sintel**, **Big Buck Bunny**, and **Tears of Steel**, open movies by the Blender Foundation, streamed from Google's public sample library. YouTube links play through YouTube's embedded player (videos that disallow embedding won't play). DRM-protected sources and subscription streaming services are not supported.
+
+**From your device:** a video or song up to 100 MB can be uploaded once to Vercel Blob (straight from the browser, never through the app server) and streamed to everyone in the room. Uploads are deleted when removed from the queue or when the room closes, and a daily cron (`/api/cleanup-uploads`) removes anything older than 24 hours left by rooms that expired. Uploads need `BLOB_READ_WRITE_TOKEN`, which Vercel provides when a Blob store is connected to the project.
 
 Each device streams its own copy directly from the source. The server shares the playback clock, not the media bytes. Buffering, autoplay rules, device performance, and network conditions can cause temporary differences; a browser may ask the user to tap once to start playback. Live streams synchronize within their available seek window.
 
@@ -56,7 +58,7 @@ The Vite site is configured in `vercel.json`. Its `/api/socket` Function handles
 
 The local `npm run dev` server continues to use in-memory state for quick development and tests. If you run a persistent Node server in production, the original single-process behavior still applies.
 
-Local rooms and chat are **in memory** and disappear on server restart. Vercel rooms use Redis with a six-hour expiry after the last room change; the room remains available across Function restarts during that period. Disconnected guests have a 90-second reconnect window. On Vercel, if a host disconnects while other people remain, hosting transfers immediately so playback controls stay available. Calls use a small peer mesh and are capped at eight people. A removed anonymous user can create a new session; use the room lock if stronger invitation control is needed.
+Local rooms and chat are **in memory** and disappear on server restart. Vercel rooms use Redis with a six-hour expiry after the last room change; the room remains available across Function restarts during that period. Disconnected guests have a 90-second reconnect window. Vercel closes WebSockets after about five minutes; clients reconnect automatically and calls carry on, since call audio and video flow peer-to-peer. Someone who stays offline for 15 seconds is taken out of the call. On Vercel, if a host disconnects while other people remain, hosting transfers immediately so playback controls stay available. Calls use a small peer mesh and are capped at eight people. A removed anonymous user can create a new session; use the room lock if stronger invitation control is needed.
 
 Text is rendered as text, session tokens are excluded from all public room snapshots, privileged events are authorized on the server, signaling is scoped to room/call membership, inputs are bounded and validated, and socket actions are rate limited. Rooms have no public directory.
 
@@ -85,7 +87,8 @@ src/PersonTile.tsx      Participant video/audio and speaking indicator
 server/rooms.js         Room state, validation, authorization, socket events
 server/redisRooms.js    Shared Redis room state for Vercel functions
 server/index.js         HTTP, Socket.IO, production asset server
-api/                    Vercel WebSocket and ICE functions
+api/                    Vercel WebSocket, ICE, upload, and upload-cleanup functions
+server/uploads.js       Local file uploads to Vercel Blob and their cleanup
 tests/                 Server and browser regression coverage
 ```
 

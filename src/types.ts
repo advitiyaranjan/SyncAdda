@@ -30,3 +30,19 @@ export type Room = {
   serverTime: number;
 };
 export type Identity = { id: string; token: string; name: string };
+// What the shared player needs from a media source (<video> or the YouTube embed).
+export type Engine = {
+  nudges: boolean;
+  ready(): boolean;
+  duration(): number;
+  seekable(): [number, number] | null;
+  time(): number;
+  seek(seconds: number): void;
+  rate(): number;
+  setRate(rate: number): void;
+  paused(): boolean;
+  ended(): boolean;
+  play(): Promise<void>;
+  pause(): void;
+  setVolume(volume: number, muted: boolean): void;
+};

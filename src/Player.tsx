@@ -13,7 +13,38 @@ import {
 } from 'lucide-react';
 import type Hls from 'hls.js';
 import { request, socket, time } from './lib';
-import type { Playback, Room } from './types';
+import type { Engine, Playback, Room } from './types';
+import {
+  YT_STATE,
+  createYouTubeEngine,
+  youtubeError,
+  youtubeId,
+  type YouTubeEngine,
+} from './youtube';
+
+const videoEngine = (el: HTMLVideoElement): Engine => ({
+  nudges: true,
+  ready: () => el.readyState >= 1,
+  duration: () => el.duration,
+  seekable: () =>
+    el.seekable.length ? [el.seekable.start(0), el.seekable.end(el.seekable.length - 1)] : null,
+  time: () => el.currentTime,
+  seek: (seconds) => {
+    el.currentTime = seconds;
+  },
+  rate: () => el.playbackRate,
+  setRate: (rate) => {
+    el.playbackRate = rate;
+  },
+  paused: () => el.paused,
+  ended: () => el.ended,
+  play: () => el.play(),
+  pause: () => el.pause(),
+  setVolume: (volume, muted) => {
+    el.volume = volume;
+    el.muted = muted;
+  },
+});
 
 export default function Player({
   room,
@@ -29,6 +60,8 @@ export default function Player({
   notify: (message: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const youtubeRef = useRef<HTMLDivElement>(null);
+  const engineRef = useRef<Engine | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const state = useRef(room.playback);
   const offset = useRef(room.serverTime - Date.now());
@@ -43,35 +76,42 @@ export default function Player({
   const [error, setError] = useState('');
   const [playback, setPlayback] = useState(room.playback);
   const media = room.playlist.find((m) => m.id === room.currentId);
+  const videoId = media ? youtubeId(media.url) : null;
   const mediaIdRef = useRef(room.currentId);
   mediaIdRef.current = room.currentId;
+  const volumeRef = useRef({ volume, muted });
+  volumeRef.current = { volume, muted };
+  const endedRef = useRef(() => {});
+  endedRef.current = () => {
+    if (isHost && canControl) void next();
+  };
   const apply = useCallback(() => {
-    const el = videoRef.current,
+    const engine = engineRef.current,
       target = state.current;
-    if (!el || el.readyState < 1) return;
+    if (!engine || !engine.ready()) return;
     let targetTime =
       target.position +
       (target.playing
         ? (Math.max(0, Date.now() + offset.current - target.updatedAt) / 1000) * target.rate
         : 0);
-    if (Number.isFinite(el.duration)) targetTime = Math.min(targetTime, el.duration);
-    else if (el.seekable.length)
-      targetTime = Math.max(
-        el.seekable.start(0),
-        Math.min(targetTime, el.seekable.end(el.seekable.length - 1)),
-      );
-    const drift = targetTime - el.currentTime;
+    const duration = engine.duration(),
+      range = engine.seekable();
+    if (Number.isFinite(duration)) targetTime = Math.min(targetTime, duration);
+    else if (range) targetTime = Math.max(range[0], Math.min(targetTime, range[1]));
+    const drift = targetTime - engine.time();
     if (Math.abs(drift) > 1.2 || (!target.playing && Math.abs(drift) > 0.1))
-      el.currentTime = targetTime;
-    el.playbackRate =
-      target.playing && Math.abs(drift) > 0.15 && Math.abs(drift) <= 1.2
+      engine.seek(targetTime);
+    const rate =
+      engine.nudges && target.playing && Math.abs(drift) > 0.15 && Math.abs(drift) <= 1.2
         ? target.rate * (drift > 0 ? 1.03 : 0.97)
         : target.rate;
-    if (target.playing && el.paused && !el.ended)
-      el.play()
+    if (engine.rate() !== rate) engine.setRate(rate);
+    if (target.playing && engine.paused() && !engine.ended())
+      engine
+        .play()
         .then(() => setBlocked(false))
         .catch(() => setBlocked(true));
-    else if (!target.playing && !el.paused) el.pause();
+    else if (!target.playing && !engine.paused()) engine.pause();
   }, []);
   useEffect(() => {
     state.current = room.playback;
@@ -118,10 +158,58 @@ export default function Player({
     setCurrentTime(0);
     setBlocked(false);
     setLoading(!!media);
-    if (!el || !media) return;
+    engineRef.current = null;
+    const host = youtubeRef.current;
+    if (!el || !host || !media) return;
     let hls: Hls | undefined,
+      youtube: YouTubeEngine | undefined,
+      poll: ReturnType<typeof setInterval> | undefined,
       disposed = false;
-    if (/\.m3u8(?:\?|$)/i.test(media.url) && !el.canPlayType('application/vnd.apple.mpegurl')) {
+    if (!videoId) engineRef.current = videoEngine(el);
+    if (videoId) {
+      createYouTubeEngine(host, videoId, {
+        ready: (engine) => {
+          if (disposed) return;
+          engineRef.current = engine;
+          engine.setVolume(volumeRef.current.volume, volumeRef.current.muted);
+          setLoading(false);
+          apply();
+        },
+        state: (value) => {
+          if (disposed) return;
+          if (value === YT_STATE.BUFFERING) setLoading(true);
+          else setLoading(false);
+          if (value === YT_STATE.PLAYING) setBlocked(false);
+          if (value === YT_STATE.ENDED) endedRef.current();
+        },
+        error: (code) => {
+          if (disposed) return;
+          setLoading(false);
+          setError(youtubeError(code));
+        },
+      })
+        .then((engine) => {
+          if (disposed) engine.destroy();
+          else youtube = engine;
+        })
+        .catch(() => {
+          if (!disposed) {
+            setLoading(false);
+            setError(
+              'YouTube couldn’t load. Check your connection or turn off any blocker for this site, then try again.',
+            );
+          }
+        });
+      poll = setInterval(() => {
+        const engine = engineRef.current;
+        if (!engine) return;
+        setCurrentTime(engine.time());
+        setDuration(engine.duration());
+      }, 250);
+    } else if (
+      /\.m3u8(?:\?|$)/i.test(media.url) &&
+      !el.canPlayType('application/vnd.apple.mpegurl')
+    ) {
       import('hls.js')
         .then(({ default: HlsPlayer }) => {
           if (disposed) return;
@@ -156,18 +244,18 @@ export default function Player({
     }
     return () => {
       clearTimeout(seekTimer.current);
+      clearInterval(poll);
       disposed = true;
+      engineRef.current = null;
       hls?.destroy();
+      youtube?.destroy();
       el.pause();
       el.removeAttribute('src');
       el.load();
     };
   }, [media?.url, media?.id]);
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.volume = volume;
-      videoRef.current.muted = muted;
-    }
+    engineRef.current?.setVolume(volume, muted);
   }, [volume, muted, media?.id]);
   async function update(patch: Partial<Playback>) {
     if (!canControl || !room.currentId) return;
@@ -180,7 +268,7 @@ export default function Player({
   function seek(value: number) {
     if (!canControl) return;
     state.current = { ...state.current, position: value, updatedAt: Date.now() + offset.current };
-    if (videoRef.current) videoRef.current.currentTime = value;
+    engineRef.current?.seek(value);
     setCurrentTime(value);
     clearTimeout(seekTimer.current);
     seekTimer.current = setTimeout(() => {
@@ -191,14 +279,14 @@ export default function Player({
     if (!media) return;
     if (blocked) {
       try {
-        await videoRef.current?.play();
+        await engineRef.current?.play();
         setBlocked(false);
       } catch {
         notify('Your browser could not play this source. Try another media link.');
       }
       return;
     }
-    await update({ playing: !playback.playing, position: videoRef.current?.currentTime || 0 });
+    await update({ playing: !playback.playing, position: engineRef.current?.time() || 0 });
   }
   async function next() {
     const index = room.playlist.findIndex((m) => m.id === room.currentId);
@@ -210,7 +298,7 @@ export default function Player({
       } catch (e) {
         notify((e as Error).message);
       }
-    } else await update({ playing: false, position: videoRef.current?.currentTime || 0 });
+    } else await update({ playing: false, position: engineRef.current?.time() || 0 });
   }
   async function fullscreen() {
     try {
@@ -220,11 +308,20 @@ export default function Player({
       notify('Fullscreen is unavailable in this browser.');
     }
   }
+  const audio = media?.kind === 'audio' && !videoId;
+  const screenClick = () => {
+    if (canControl || blocked) void toggle();
+  };
   return (
     <div className="player-shell" ref={containerRef}>
-      <div className={`player-screen ${media?.kind === 'audio' ? 'audio-screen' : ''}`}>
+      <div className={`player-screen ${audio ? 'audio-screen' : ''}`}>
+        <div className="youtube-host" ref={youtubeRef} hidden={!videoId} />
+        {/* Keeps clicks on our shared controls instead of YouTube's own (unsynced) ones. */}
+        {videoId && <div className="youtube-shield" onClick={screenClick} />}
         <video
           ref={videoRef}
+          hidden={!!videoId}
+          preload="auto"
           playsInline
           onLoadedMetadata={(e) => {
             setDuration(e.currentTarget.duration);
@@ -249,9 +346,7 @@ export default function Player({
               );
             }
           }}
-          onClick={() => {
-            if (canControl || blocked) void toggle();
-          }}
+          onClick={screenClick}
         />
         {!media && (
           <div className="player-empty">
@@ -280,7 +375,7 @@ export default function Player({
             </span>
           </div>
         )}
-        {media?.kind === 'audio' && (
+        {audio && (
           <div className="audio-art">
             <div className={`vinyl ${playback.playing ? 'is-playing' : ''}`}>
               <div>

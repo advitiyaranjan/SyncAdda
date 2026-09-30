@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, Check, Copy, Link2, LoaderCircle, LockKeyhole, Users } from 'lucide-react';
 import { Modal } from './components';
-import { getIdentity, rememberIdentity, request, socket } from './lib';
+import { callState, getIdentity, rememberIdentity, request, socket } from './lib';
 import type { Identity, Room } from './types';
 import Landing from './Landing';
 import WatchRoom from './WatchRoom';
@@ -41,6 +41,7 @@ export default function App() {
           const data = await request<{ room: Room }>('room:join', {
             code: restore,
             identity: identityRef.current,
+            call: callState,
           });
           activeCode.current = restore;
           setRoom(data.room);
