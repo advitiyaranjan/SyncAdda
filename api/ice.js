@@ -1,10 +1,6 @@
-export default function handler(_request, response) {
-  let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-  try {
-    if (process.env.ICE_SERVERS_JSON) iceServers = JSON.parse(process.env.ICE_SERVERS_JSON);
-  } catch {
-    console.error('Invalid ICE_SERVERS_JSON.');
-  }
+import { iceServers } from '../server/ice.js';
+
+export default async function handler(_request, response) {
   response.setHeader('Cache-Control', 'no-store');
-  response.json({ iceServers });
+  response.json({ iceServers: await iceServers() });
 }

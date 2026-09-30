@@ -4,6 +4,7 @@ import { Server } from 'socket.io';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { attachRooms } from './rooms.js';
+import { iceServers } from './ice.js';
 import { sameSecret, uploadHandler } from './uploads.js';
 
 const app = express();
@@ -36,15 +37,10 @@ app.post('/api/upload', express.json(), (req, res) =>
   }),
 );
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
-app.get('/api/ice', (_req, res) => {
-  let iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
-  try {
-    if (process.env.ICE_SERVERS_JSON) iceServers = JSON.parse(process.env.ICE_SERVERS_JSON);
-  } catch {
-    console.error('Invalid ICE_SERVERS_JSON; using STUN fallback.');
-  }
+app.get('/api/ice', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ iceServers });
+  res.json({ iceServers: await iceServers() });
+});
 });
 const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
 app.use(express.static(dist));
