@@ -92,7 +92,7 @@ test('calls and cameras survive the room connection dropping for everyone', asyn
   );
   for (const p of [a, b]) await p.context().close();
 });
-for (const how of ['closes the tab', 'goes back'] as const)
+for (const how of ['closes the tab', 'leaves the room'] as const)
   test(`when one person ${how}, everyone else keeps their cameras`, async ({ browser }) => {
     const a = await person(browser, 'Asha');
     const b = await person(browser, 'Bina', a.url());
@@ -104,8 +104,11 @@ for (const how of ['closes the tab', 'goes back'] as const)
     await expectCamera(b, 'Asha');
     await expectCamera(a, 'Chetan');
 
-    if (how === 'goes back') await c.goBack();
-    else await c.context().close();
+    if (how === 'leaves the room') {
+      // Back asks first; leaving is a choice.
+      await c.goBack();
+      await c.getByRole('dialog').getByRole('button', { name: 'Leave room' }).click();
+    } else await c.context().close();
     // A closed tab may not get to say goodbye; the server drops it from the call after 15 seconds.
     await expect(a.getByText('2 people in the call', { exact: true })).toBeVisible({
       timeout: 30_000,
@@ -124,3 +127,22 @@ for (const how of ['closes the tab', 'goes back'] as const)
         .close()
         .catch(() => {});
   });
+
+test('Back keeps you in the room and the call, and asks before leaving', async ({ browser }) => {
+  const a = await person(browser, 'Asha');
+  const b = await person(browser, 'Bina', a.url());
+  for (const p of [a, b]) await joinWithCamera(p);
+  await expectCamera(a, 'Bina');
+  const url = b.url();
+  await b.goBack();
+  await expect(b.getByRole('heading', { name: 'Heading out?' })).toBeVisible();
+  expect(b.url()).toBe(url);
+  await b.getByRole('button', { name: 'Stay a little longer' }).click();
+  // Pressing Back again asks again, and nothing was interrupted meanwhile.
+  await b.goBack();
+  await expect(b.getByRole('heading', { name: 'Heading out?' })).toBeVisible();
+  await expect(a.getByText('2 people in the call', { exact: true })).toBeVisible();
+  await expectCamera(a, 'Bina');
+  await expectCamera(b, 'Asha');
+  for (const p of [a, b]) await p.context().close();
+});

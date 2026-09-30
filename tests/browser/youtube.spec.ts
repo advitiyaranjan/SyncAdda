@@ -80,6 +80,25 @@ test('YouTube links play in sync for everyone', async ({ page, browser }) => {
   );
   expect(Math.abs(hostTime - guestTime)).toBeLessThan(1.5);
   await page.screenshot({ path: 'test-results/youtube-room.png' });
+
+  // The host's page goes to the background and YouTube pauses itself there: that mustn't pause
+  // everyone, and the host catches up on return.
+  const setVisibility = (state: 'hidden' | 'visible') =>
+    page.evaluate((value) => {
+      Object.defineProperty(document, 'visibilityState', { get: () => value, configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, state);
+  await setVisibility('hidden');
+  await youtubeVideo(page).evaluate((el: HTMLVideoElement) => el.pause());
+  await page.waitForTimeout(3000);
+  expect(await youtubeVideo(guest).evaluate((el: HTMLVideoElement) => el.paused)).toBe(false);
+  await setVisibility('visible');
+  await expect
+    .poll(() => youtubeVideo(page).evaluate((el: HTMLVideoElement) => el.paused))
+    .toBe(false);
+  await expect
+    .poll(() => youtubeVideo(page).evaluate((el: HTMLVideoElement) => el.playbackRate))
+    .toBe(1.5);
   expect(errors).toEqual([]);
   await guestContext.close();
 });

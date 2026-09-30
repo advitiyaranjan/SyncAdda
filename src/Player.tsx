@@ -69,6 +69,7 @@ export default function Player({
   const offset = useRef(room.serverTime - Date.now());
   const clockSamples = useRef<{ rtt: number; offset: number }[]>([]);
   const lastSeek = useRef(0);
+  const shownAt = useRef(0);
   const seekTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -95,7 +96,9 @@ export default function Player({
   youtubeActionRef.current = (value) => {
     const engine = engineRef.current,
       target = state.current;
-    if (!engine) return;
+    // YouTube pauses itself when the page goes to the background; that isn't the owner's doing.
+    if (!engine || document.visibilityState !== 'visible' || Date.now() - shownAt.current < 1500)
+      return;
     const playing = value === YT_STATE.PLAYING,
       paused = value === YT_STATE.PAUSED;
     // Our own recent jumps also move the player; don't mistake them for a seek.
@@ -145,12 +148,13 @@ export default function Player({
     }
     // Speed up or slow down slightly in proportion to the gap (closing it over about 3 seconds,
     // at most 8%), ignoring gaps under 25 ms. Browsers keep the pitch, so it isn't noticeable.
+    // Corrections move in 1% steps, so phones aren't retuning the speed several times a second.
     const correction =
       engine.nudges && target.playing && Math.abs(drift) > 0.025
-        ? Math.max(-0.08, Math.min(0.08, drift / 3))
+        ? Math.round(Math.max(-0.08, Math.min(0.08, drift / 3)) * 100) / 100
         : 0;
     const rate = target.rate * (1 + correction);
-    if (Math.abs(engine.rate() - rate) > 0.001) engine.setRate(rate);
+    if (Math.abs(engine.rate() - rate) > 0.004) engine.setRate(rate);
     if (target.playing && engine.paused() && !engine.ended())
       engine
         .play()
@@ -199,9 +203,18 @@ export default function Player({
     socket.on('playback:state', receive);
     socket.on('connect', calibrate);
     void calibrate();
+    // Back from the background (timers were throttled, the player may have been paused): catch up.
+    const shown = () => {
+      if (document.visibilityState !== 'visible') return;
+      shownAt.current = Date.now();
+      apply();
+      void sync();
+    };
+    document.addEventListener('visibilitychange', shown);
     const timer = setInterval(sync, 4000);
     const driftTimer = setInterval(apply, 300);
     return () => {
+      document.removeEventListener('visibilitychange', shown);
       socket.off('playback:state', receive);
       socket.off('connect', calibrate);
       clearInterval(timer);
@@ -317,6 +330,51 @@ export default function Player({
   useEffect(() => {
     engineRef.current?.setVolume(volume, muted);
   }, [volume, muted, media?.id]);
+  // Lock-screen and notification controls. They also help the browser keep the movie or song
+  // playing while the page is in the background.
+  const updateRef = useRef(update);
+  updateRef.current = update;
+  useEffect(() => {
+    if (!('mediaSession' in navigator) || !media) return;
+    const session = navigator.mediaSession;
+    session.metadata = new MediaMetadata({
+      title: media.title,
+      artist: room.name,
+      album: 'SyncAdda',
+      artwork: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml' }],
+    });
+    const control = (playing: boolean) =>
+      canControl
+        ? () => void updateRef.current({ playing, position: engineRef.current?.time() || 0 })
+        : null;
+    const actions: [MediaSessionAction, MediaSessionActionHandler | null][] = [
+      ['play', control(true)],
+      ['pause', control(false)],
+    ];
+    for (const [action, handler] of actions)
+      try {
+        session.setActionHandler(action, handler);
+      } catch {
+        /* not supported in this browser */
+      }
+    return () => {
+      session.metadata = null;
+      for (const [action] of actions)
+        try {
+          session.setActionHandler(action, null);
+        } catch {
+          /* not supported in this browser */
+        }
+    };
+  }, [media?.id, media?.title, room.name, canControl]);
+  useEffect(() => {
+    if ('mediaSession' in navigator)
+      navigator.mediaSession.playbackState = media
+        ? playback.playing
+          ? 'playing'
+          : 'paused'
+        : 'none';
+  }, [playback.playing, media]);
   async function update(patch: Partial<Playback>) {
     if (!canControl || !room.currentId) return;
     try {

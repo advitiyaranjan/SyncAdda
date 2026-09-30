@@ -21,6 +21,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+  const [askLeave, setAskLeave] = useState(0);
   const activeCode = useRef('');
   const identityRef = useRef(identity);
   const notify = useCallback((message: string) => setToast(message), []);
@@ -111,10 +112,11 @@ export default function App() {
   }, [room?.name, !!room]);
   useEffect(() => {
     const pop = () => {
+      // Back never drops anyone out of a room (stopping the movie and the call): stay, and ask.
       if (activeCode.current) {
-        request('room:leave').catch(() => {});
-        activeCode.current = '';
-        setRoom(null);
+        history.pushState({ guard: true }, '', `/room/${activeCode.current}`);
+        setAskLeave((n) => n + 1);
+        return;
       }
       const next = pathCode();
       if (next) {
@@ -125,6 +127,10 @@ export default function App() {
     window.addEventListener('popstate', pop);
     return () => window.removeEventListener('popstate', pop);
   }, []);
+  // A spare history entry in the room, so Back lands on it (and asks) instead of leaving the site.
+  useEffect(() => {
+    if (room?.code && !history.state?.guard) history.pushState({ guard: true }, '', location.href);
+  }, [room?.code]);
   async function enter(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -175,6 +181,7 @@ export default function App() {
           room={room}
           identity={identity}
           connected={connected}
+          askLeave={askLeave}
           onShare={() => setDialog('share')}
           onLeave={leave}
           notify={notify}

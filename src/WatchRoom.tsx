@@ -50,6 +50,7 @@ export default function WatchRoom({
   room,
   identity,
   connected,
+  askLeave,
   onShare,
   onLeave,
   notify,
@@ -57,6 +58,7 @@ export default function WatchRoom({
   room: Room;
   identity: Identity;
   connected: boolean;
+  askLeave: number;
   onShare: () => void;
   onLeave: () => Promise<void>;
   notify: (message: string) => void;
@@ -102,6 +104,10 @@ export default function WatchRoom({
   }, [mediaUrl]);
   const chatEnd = useRef<HTMLDivElement>(null);
   const call = useCall(identity.id, room.participants, notify);
+  // Back was pressed: ask before leaving (the movie and the call keep going meanwhile).
+  useEffect(() => {
+    if (askLeave) setModal('leave');
+  }, [askLeave]);
   useWakeLock((!!room.currentId && room.playback.playing) || call.inCall);
   const closeModal = useCallback(() => {
     setModal(null);
@@ -1032,9 +1038,11 @@ export default function WatchRoom({
           subtitle={
             modal === 'close'
               ? 'This closes the room for everyone. The chat and queue will be cleared.'
-              : isHost && online > 1
-                ? 'Your friends can keep watching. Another participant will become the host.'
-                : 'You can come back with the same room link while the room is active.'
+              : room.participants.length === 2
+                ? 'Only one person would be left, so this closes the room for them too.'
+                : isHost && online > 1
+                  ? 'Your friends can keep watching. Another participant will become the host.'
+                  : 'You can come back with the same room link while the room is active.'
           }
           onClose={closeModal}
         >

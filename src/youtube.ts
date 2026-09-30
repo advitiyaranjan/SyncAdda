@@ -13,6 +13,7 @@ type YTPlayer = {
   getPlaybackRate(): number;
   setPlaybackRate(rate: number): void;
   setVolume(volume: number): void;
+  unloadModule(name: string): void;
   mute(): void;
   unMute(): void;
   destroy(): void;
@@ -29,6 +30,7 @@ type YTNamespace = {
         onReady: () => void;
         onStateChange: (event: { data: number }) => void;
         onError: (event: { data: number }) => void;
+        onPlaybackRateChange: (event: { data: number }) => void;
       };
     },
   ) => YTPlayer;
@@ -119,6 +121,12 @@ export async function createYouTubeEngine(
   let ready = false;
   // Where a cued (not yet started) video will begin; getCurrentTime() is unreliable until then.
   let cuedAt: number | null = 0;
+  // The room's speed. YouTube resets to 1x whenever it (re)loads the video, so it's re-applied.
+  let desiredRate = 1;
+  let captionsOff = false;
+  const keepRate = () => {
+    if (player.getPlaybackRate() !== desiredRate) player.setPlaybackRate(desiredRate);
+  };
   let pending: { promise: Promise<void>; done: (ok: boolean) => void; timer: number } | null = null;
   const state = () => player.getPlayerState();
   const active = () => state() === YT_STATE.PLAYING || state() === YT_STATE.BUFFERING;
@@ -131,6 +139,7 @@ export async function createYouTubeEngine(
       // YouTube's own controls (captions, quality, settings) are shown; Player shares the owner's
       // play, pause, and seek from them with everyone.
       controls: 1,
+      cc_load_policy: 0,
       iv_load_policy: 3,
       playsinline: 1,
       rel: 0,
@@ -146,7 +155,20 @@ export async function createYouTubeEngine(
           cuedAt = null;
           pending?.done(true);
         }
+        if (data === YT_STATE.PLAYING) {
+          keepRate();
+          // Captions start off (YouTube may turn them on from someone's account settings);
+          // anyone can still switch them on with the CC button.
+          if (!captionsOff) {
+            captionsOff = true;
+            player.unloadModule('captions');
+            player.unloadModule('cc');
+          }
+        }
         on.state(data);
+      },
+      onPlaybackRateChange: () => {
+        if (state() === YT_STATE.PLAYING) keepRate();
       },
       onError: ({ data }) => {
         pending?.done(false);
@@ -171,7 +193,10 @@ export async function createYouTubeEngine(
       } else player.seekTo(seconds, true);
     },
     rate: () => player.getPlaybackRate(),
-    setRate: (rate) => player.setPlaybackRate(rate),
+    setRate(rate) {
+      desiredRate = rate;
+      player.setPlaybackRate(rate);
+    },
     paused: () => !active(),
     ended: () => state() === YT_STATE.ENDED,
     play() {
