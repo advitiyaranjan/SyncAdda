@@ -2,6 +2,7 @@ import { test, expect, type Page, type Route } from '@playwright/test';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
 
+const base = process.env.SYNCADDA_URL || '';
 const mediaBytes = readFileSync(path.resolve('tests/fixtures/flower.mp4'));
 async function serveMedia(route: Route) {
   const range = route.request().headers().range;
@@ -27,7 +28,7 @@ async function enter(page: Page, name: string, url?: string) {
     await page.getByLabel('Your name').fill(name);
     await page.getByRole('button', { name: 'Let me in' }).click();
   } else {
-    await page.goto('/');
+    await page.goto(`${base}/`);
     await page.getByRole('button', { name: 'Create a room', exact: true }).first().click();
     await page.getByLabel('Your name').fill(name);
     await page.getByRole('button', { name: 'Create my room' }).click();
