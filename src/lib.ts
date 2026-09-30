@@ -1,8 +1,9 @@
 import { io } from 'socket.io-client';
 import type { Identity, Media } from './types';
+const socketPath = import.meta.env.VITE_SOCKET_PATH || '/socket.io';
 export const socket = io({
-  path: import.meta.env.PROD ? '/api/socket' : '/socket.io',
-  transports: import.meta.env.PROD ? ['websocket'] : undefined,
+  path: socketPath,
+  transports: socketPath === '/api/socket' ? ['websocket'] : undefined,
   autoConnect: false,
   reconnection: true,
   reconnectionDelay: 500,
