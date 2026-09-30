@@ -2023,6 +2023,18 @@ html[data-theme='dark'] {
   top: 0;
   overflow: hidden;
 }
+/* The room header stays put while scrolling, except on short screens (such as a zoomed-in
+   page), where it would cover too much of the room. */
+@media (min-height: 560px) {
+  .room-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .room-sidebar {
+    top: 80px;
+  }
+}
 .sidebar-tabs {
   height: 61px;
   display: flex;
@@ -2461,7 +2473,8 @@ html[data-theme='dark'] {
   border: 1px solid #d5e0c7;
   border-radius: 8px;
   padding: 5px;
-  width: 120px;
+  min-width: 120px;
+  width: max-content;
   box-shadow: 0 5px 20px #0004;
 }
 .person-menu button {

@@ -49,12 +49,14 @@ const videoEngine = (el: HTMLVideoElement): Engine => ({
 export default function Player({
   room,
   canControl,
+  canAdd,
   isHost,
   onAdd,
   notify,
 }: {
   room: Room;
   canControl: boolean;
+  canAdd: boolean;
   isHost: boolean;
   onAdd: () => void;
   notify: (message: string) => void;
@@ -65,7 +67,8 @@ export default function Player({
   const containerRef = useRef<HTMLDivElement>(null);
   const state = useRef(room.playback);
   const offset = useRef(room.serverTime - Date.now());
-  const bestRtt = useRef(Infinity);
+  const clockSamples = useRef<{ rtt: number; offset: number }[]>([]);
+  const lastSeek = useRef(0);
   const seekTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -98,14 +101,27 @@ export default function Player({
       range = engine.seekable();
     if (Number.isFinite(duration)) targetTime = Math.min(targetTime, duration);
     else if (range) targetTime = Math.max(range[0], Math.min(targetTime, range[1]));
-    const drift = targetTime - engine.time();
-    if (Math.abs(drift) > 1.2 || (!target.playing && Math.abs(drift) > 0.1))
+    let drift = targetTime - engine.time();
+    // Big gaps jump straight to the shared position. YouTube can't fine-tune its speed, so it
+    // jumps at a smaller gap; seeking rebuffers, so small gaps are closed by speed instead.
+    // After a jump, give the player a moment to buffer before jumping again.
+    const settled = Date.now() - lastSeek.current > 2000;
+    if (
+      (settled && Math.abs(drift) > (engine.nudges ? 1 : 0.5)) ||
+      (!target.playing && Math.abs(drift) > 0.1)
+    ) {
       engine.seek(targetTime);
-    const rate =
-      engine.nudges && target.playing && Math.abs(drift) > 0.15 && Math.abs(drift) <= 1.2
-        ? target.rate * (drift > 0 ? 1.03 : 0.97)
-        : target.rate;
-    if (engine.rate() !== rate) engine.setRate(rate);
+      lastSeek.current = Date.now();
+      drift = 0;
+    }
+    // Speed up or slow down slightly in proportion to the gap (closing it over about 3 seconds,
+    // at most 8%), ignoring gaps under 25 ms. Browsers keep the pitch, so it isn't noticeable.
+    const correction =
+      engine.nudges && target.playing && Math.abs(drift) > 0.025
+        ? Math.max(-0.08, Math.min(0.08, drift / 3))
+        : 0;
+    const rate = target.rate * (1 + correction);
+    if (Math.abs(engine.rate() - rate) > 0.001) engine.setRate(rate);
     if (target.playing && engine.paused() && !engine.ended())
       engine
         .play()
@@ -125,27 +141,40 @@ export default function Player({
       setPlayback(data.playback);
       apply();
     };
+    const ping = async () => {
+      const start = Date.now();
+      const clock = await request<{ serverTime: number }>('clock:ping');
+      const rtt = Date.now() - start;
+      clockSamples.current = [
+        ...clockSamples.current.slice(-7),
+        { rtt, offset: clock.serverTime - start - rtt / 2 },
+      ];
+      // The quickest recent round trip gives the most accurate reading of the server clock.
+      offset.current = clockSamples.current.reduce((a, b) => (b.rtt < a.rtt ? b : a)).offset;
+    };
     const sync = async () => {
       if (!socket.connected) return;
-      const start = Date.now();
       try {
-        const clock = await request<{ serverTime: number }>('clock:ping');
-        const rtt = Date.now() - start;
-        if (rtt < bestRtt.current) {
-          bestRtt.current = rtt;
-          offset.current = clock.serverTime - start - rtt / 2;
-        }
+        await ping();
         receive(await request<{ playback: Playback; currentId: string }>('playback:sync'));
       } catch {
         /* reconnect will restore state */
       }
     };
+    // A reconnect may reach a different server, so re-measure the clock with a quick burst.
+    const calibrate = async () => {
+      clockSamples.current = [];
+      for (let i = 0; i < 4 && socket.connected; i++) await ping().catch(() => {});
+      void sync();
+    };
     socket.on('playback:state', receive);
-    void sync();
+    socket.on('connect', calibrate);
+    void calibrate();
     const timer = setInterval(sync, 4000);
-    const driftTimer = setInterval(apply, 1500);
+    const driftTimer = setInterval(apply, 300);
     return () => {
       socket.off('playback:state', receive);
+      socket.off('connect', calibrate);
       clearInterval(timer);
       clearInterval(driftTimer);
     };
@@ -360,11 +389,11 @@ export default function Player({
             <span className="eyebrow">THE BEST SEAT IS RIGHT HERE</span>
             <h2>What are we watching?</h2>
             <p>
-              {canControl
+              {canAdd
                 ? 'Add something you love. Make a moment of it.'
                 : 'The host is picking something good. Settle in.'}
             </p>
-            {canControl && (
+            {canAdd && (
               <button className="button primary" onClick={onAdd}>
                 <Plus size={18} />
                 Choose something to watch
@@ -413,7 +442,7 @@ export default function Player({
             <Film size={28} />
             <h3>We couldn’t play that one.</h3>
             <p>{error}</p>
-            {canControl && (
+            {canAdd && (
               <button className="button secondary" onClick={onAdd}>
                 Try another link
               </button>

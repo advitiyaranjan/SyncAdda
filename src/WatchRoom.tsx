@@ -7,6 +7,7 @@ import {
   Headphones,
   Link2,
   ListMusic,
+  ListPlus,
   LoaderCircle,
   LockKeyhole,
   LogOut,
@@ -61,6 +62,7 @@ export default function WatchRoom({
 }) {
   const isHost = room.hostId === identity.id;
   const canControl = connected && (isHost || room.everyoneControls);
+  const canAdd = canControl || (connected && (room.queueAccess ?? []).includes(identity.id));
   const [panel, setPanel] = useState<'chat' | 'queue' | 'people'>('chat');
   const [mobileView, setMobileView] = useState<'watch' | 'chat' | 'people' | 'call'>('watch');
   const [modal, setModal] = useState<'media' | 'settings' | 'leave' | 'close' | null>(null);
@@ -163,8 +165,8 @@ export default function WatchRoom({
   }
   async function shareFile() {
     if (!mediaFile || busy) return;
-    if (!canControl) {
-      setFormError('Only the host can add to the queue right now.');
+    if (!canAdd) {
+      setFormError('Ask the host to let you add to the queue.');
       return;
     }
     setBusy(true);
@@ -262,7 +264,14 @@ export default function WatchRoom({
               {connected ? 'Connected' : 'Reconnecting'}
             </span>
           </div>
-          <Player room={room} isHost={isHost} canControl={canControl} onAdd={add} notify={notify} />
+          <Player
+            room={room}
+            isHost={isHost}
+            canControl={canControl}
+            canAdd={canAdd}
+            onAdd={add}
+            notify={notify}
+          />
           <div className="now-playing">
             <div>
               <span className="eyebrow">{current ? 'NOW PLAYING' : 'MAKE YOURSELF AT HOME'}</span>
@@ -273,7 +282,7 @@ export default function WatchRoom({
                   : 'Invite your people, pick something to watch, and settle in.'}
               </p>
             </div>
-            {canControl && (
+            {canAdd && (
               <button className="button dark-secondary small" onClick={add}>
                 <Plus size={16} />
                 <span>Add media</span>
@@ -464,7 +473,7 @@ export default function WatchRoom({
                     sharing
                   </p>
                 </div>
-                {canControl && (
+                {canAdd && (
                   <button className="icon-button" onClick={add} aria-label="Add media to queue">
                     <Plus size={20} />
                   </button>
@@ -524,11 +533,11 @@ export default function WatchRoom({
                   <ListMusic size={35} strokeWidth={1.2} />
                   <h3>The night is a blank canvas.</h3>
                   <p>
-                    {canControl
+                    {canAdd
                       ? 'Add a video, a song, or a live stream to your shared queue.'
                       : 'Your host will add something to the queue soon.'}
                   </p>
-                  {canControl && (
+                  {canAdd && (
                     <button className="button primary small" onClick={add}>
                       <Plus size={15} />
                       Add the first one
@@ -573,6 +582,11 @@ export default function WatchRoom({
                         </>
                       ) : !person.online ? (
                         'Reconnecting…'
+                      ) : (room.queueAccess ?? []).includes(person.id) ? (
+                        <>
+                          <ListPlus size={11} />
+                          Can add to the queue
+                        </>
                       ) : person.inCall ? (
                         'In the call'
                       ) : (
@@ -585,11 +599,31 @@ export default function WatchRoom({
                     {person.camera ? <Video size={14} /> : <VideoOff size={14} />}
                   </div>
                   {isHost && person.id !== identity.id && (
-                    <details className="person-menu">
+                    <details
+                      className="person-menu"
+                      // Close the menu once one of its actions is chosen.
+                      onClick={(e) => {
+                        if ((e.target as HTMLElement).closest('button'))
+                          e.currentTarget.removeAttribute('open');
+                      }}
+                    >
                       <summary aria-label={`Manage ${person.name}`}>
                         <MoreHorizontal size={17} />
                       </summary>
                       <div>
+                        <button
+                          onClick={() =>
+                            action('room:queue-access', {
+                              id: person.id,
+                              allowed: !(room.queueAccess ?? []).includes(person.id),
+                            })
+                          }
+                        >
+                          <ListPlus size={13} />
+                          {(room.queueAccess ?? []).includes(person.id)
+                            ? 'Stop queue access'
+                            : 'Let them add to queue'}
+                        </button>
                         <button onClick={() => action('room:transfer', { id: person.id })}>
                           <Crown size={13} />
                           Make host

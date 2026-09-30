@@ -23,6 +23,19 @@ const mediaSchema = z.object({
     .refine((value) => /^https?:\/\//i.test(value), 'Use an http or https media URL.'),
   kind: z.enum(['video', 'audio']),
 });
+/**
+ * Whether a person may do something that needs 'host', 'control' (playback and queue order) or 'add'
+ * (adding to the queue). The host can do everything; the host can hand out queue access per person,
+ * or give everyone the remote with the everyoneControls setting.
+ */
+export function permitted(room, id, need) {
+  if (!need || room.hostId === id) return true;
+  if (need === 'host') return false;
+  if (room.everyoneControls) return true;
+  return need === 'add' && (room.queueAccess ?? []).includes(id);
+}
+export const deniedMessage = (need) =>
+  need === 'add' ? 'Ask the host to let you add to the queue.' : 'Only the host can do that.';
 export const positionAt = (playback, now = Date.now()) =>
   playback.position +
   (playback.playing ? (Math.max(0, now - playback.updatedAt) / 1000) * playback.rate : 0);
@@ -48,6 +61,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
     clearTimeout(person.timer);
     timers.delete(person.timer);
     room.people.delete(id);
+    room.queueAccess = room.queueAccess.filter((p) => p !== id);
     system(room, `${person.name} left the room.`);
     if (!room.people.size) {
       rooms.delete(room.code);
@@ -90,12 +104,11 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
           });
         }
       });
-    const current = (hostOnly = false, control = false) => {
+    const current = (need) => {
       const room = rooms.get(socket.data.code);
       if (!room || room.people.get(socket.data.personId)?.socketId !== socket.id)
         throw new Error('Join a room to continue.');
-      if ((hostOnly || (control && !room.everyoneControls)) && room.hostId !== socket.data.personId)
-        throw new Error('Only the host can do that.');
+      if (!permitted(room, socket.data.personId, need)) throw new Error(deniedMessage(need));
       return room;
     };
     const join = async (room, user, call = offCall) => {
@@ -161,6 +174,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
         hostId: input.identity.id,
         locked: false,
         everyoneControls: false,
+        queueAccess: [],
         people: new Map(),
         banned: new Set(),
         playlist: [],
@@ -186,7 +200,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       remove(room, id);
     });
     event('room:settings', (data) => {
-      const room = current(true);
+      const room = current('host');
       const input = z
         .object({
           locked: z.boolean().optional(),
@@ -198,14 +212,29 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       broadcast(room);
     });
     event('room:transfer', (data) => {
-      const room = current(true);
+      const room = current('host');
       if (!room.people.get(data.id)?.online) throw new Error('That person is not connected.');
       room.hostId = data.id;
       system(room, `${room.people.get(data.id).name} is now the host.`);
       broadcast(room);
     });
+    event('room:queue-access', (data) => {
+      const room = current('host');
+      const input = z.object({ id: z.string().uuid(), allowed: z.boolean() }).parse(data);
+      const person = room.people.get(input.id);
+      if (!person) throw new Error('That person has already left.');
+      room.queueAccess = room.queueAccess.filter((id) => id !== input.id);
+      if (input.allowed) room.queueAccess.push(input.id);
+      system(
+        room,
+        input.allowed
+          ? `${person.name} can now add to the queue.`
+          : `${person.name} can no longer add to the queue.`,
+      );
+      broadcast(room);
+    });
     event('room:kick', (data) => {
-      const room = current(true);
+      const room = current('host');
       if (data.id === room.hostId) throw new Error('You cannot remove yourself.');
       const person = room.people.get(data.id);
       if (!person) throw new Error('That person has already left.');
@@ -219,7 +248,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       remove(room, data.id);
     });
     event('room:close', () => {
-      const room = current(true);
+      const room = current('host');
       io.to(room.code).emit('room:ended', {
         message: 'The host ended this watch party. See you next time!',
       });
@@ -253,7 +282,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       });
     });
     event('media:add', (data) => {
-      const room = current(false, true);
+      const room = current('add');
       if (room.playlist.length >= 40) throw new Error('Your queue is full. Remove an item first.');
       const media = { ...mediaSchema.parse(data), id: randomUUID() };
       room.playlist.push(media);
@@ -264,7 +293,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       broadcast(room);
     });
     event('media:select', (data) => {
-      const room = current(false, true);
+      const room = current('control');
       if (!room.playlist.some((m) => m.id === data.id))
         throw new Error('That item is no longer in the queue.');
       room.currentId = data.id;
@@ -272,7 +301,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       broadcast(room);
     });
     event('media:remove', (data) => {
-      const room = current(false, true);
+      const room = current('control');
       const before = room.playlist;
       room.playlist = room.playlist.filter((m) => m.id !== data.id);
       void deleteUploads(droppedUploads(before, room.playlist));
@@ -283,7 +312,7 @@ export function attachRooms(io, { graceMs = 90_000, callGraceMs = 15_000 } = {})
       broadcast(room);
     });
     event('playback:update', (data) => {
-      const room = current(false, true);
+      const room = current('control');
       const input = z
         .object({
           mediaId: z.string().uuid(),

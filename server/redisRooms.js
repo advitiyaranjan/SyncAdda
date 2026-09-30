@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import Redis from 'ioredis';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { z } from 'zod';
-import { callSchema, positionAt } from './rooms.js';
+import { callSchema, deniedMessage, permitted, positionAt } from './rooms.js';
 import { deleteUploads, droppedUploads, sameSecret } from './uploads.js';
 
 const identitySchema = z.object({
@@ -56,6 +56,7 @@ export async function attachRedisRooms(
     hostId: room.hostId,
     locked: room.locked,
     everyoneControls: room.everyoneControls,
+    queueAccess: room.queueAccess ?? [],
     participants: Object.values(room.people).map(
       ({ token, socketId, offlineSince, ...person }) => person,
     ),
@@ -74,6 +75,7 @@ export async function attachRedisRooms(
     const person = room.people[id];
     if (!person) return;
     delete room.people[id];
+    room.queueAccess = (room.queueAccess ?? []).filter((p) => p !== id);
     system(room, `${person.name} left the room.`);
     if (room.hostId === id && Object.keys(room.people).length) {
       room.hostId =
@@ -161,30 +163,22 @@ export async function attachRedisRooms(
         if (name === 'call:signal') signalQueue = signalQueue.then(run);
         else void run();
       });
-    const current = async (hostOnly = false, control = false) => {
+    const current = async (need) => {
       const code = socket.data.code,
         id = socket.data.personId;
       if (!code || !id) throw new Error('Join a room to continue.');
       const room = await read(code);
       if (!room || room.people[id]?.socketId !== socket.id)
         throw new Error('Join a room to continue.');
-      if ((hostOnly || (control && !room.everyoneControls)) && room.hostId !== id)
-        throw new Error('Only the host can do that.');
+      if (!permitted(room, id, need)) throw new Error(deniedMessage(need));
       return room;
     };
-    const change = async (
-      handler,
-      { hostOnly = false, control = false, broadcastState = true } = {},
-    ) => {
-      const active = await current(hostOnly, control);
+    const change = async (handler, { need, broadcastState = true } = {}) => {
+      const active = await current(need);
       const { value, room } = await mutate(active.code, (room) => {
         if (room.people[socket.data.personId]?.socketId !== socket.id)
           throw new Error('Join a room to continue.');
-        if (
-          (hostOnly || (control && !room.everyoneControls)) &&
-          room.hostId !== socket.data.personId
-        )
-          throw new Error('Only the host can do that.');
+        if (!permitted(room, socket.data.personId, need)) throw new Error(deniedMessage(need));
         return handler(room);
       });
       if (broadcastState && Object.keys(room.people).length) broadcast(room);
@@ -209,6 +203,7 @@ export async function attachRedisRooms(
           hostId: input.identity.id,
           locked: false,
           everyoneControls: false,
+          queueAccess: [],
           people: {
             [input.identity.id]: {
               ...input.identity,
@@ -292,7 +287,7 @@ export async function attachRedisRooms(
           name: z.string().trim().min(1).max(48).optional(),
         })
         .parse(data);
-      await change((room) => Object.assign(room, input), { hostOnly: true });
+      await change((room) => Object.assign(room, input), { need: 'host' });
     });
     event('room:transfer', async (data) => {
       await change(
@@ -301,7 +296,25 @@ export async function attachRedisRooms(
           room.hostId = data.id;
           system(room, `${room.people[data.id].name} is now the host.`);
         },
-        { hostOnly: true },
+        { need: 'host' },
+      );
+    });
+    event('room:queue-access', async (data) => {
+      const input = z.object({ id: z.string().uuid(), allowed: z.boolean() }).parse(data);
+      await change(
+        (room) => {
+          const person = room.people[input.id];
+          if (!person) throw new Error('That person has already left.');
+          room.queueAccess = (room.queueAccess ?? []).filter((id) => id !== input.id);
+          if (input.allowed) room.queueAccess.push(input.id);
+          system(
+            room,
+            input.allowed
+              ? `${person.name} can now add to the queue.`
+              : `${person.name} can no longer add to the queue.`,
+          );
+        },
+        { need: 'host' },
       );
     });
     event('room:kick', async (data) => {
@@ -314,7 +327,7 @@ export async function attachRedisRooms(
           remove(room, data.id);
           return person.socketId;
         },
-        { hostOnly: true, broadcastState: false },
+        { need: 'host', broadcastState: false },
       );
       io.to(target).emit('room:ended', { message: 'The host removed you from this room.' });
       io.in(target).socketsLeave(room.code);
@@ -325,7 +338,7 @@ export async function attachRedisRooms(
         (room) => {
           room.people = {};
         },
-        { hostOnly: true, broadcastState: false },
+        { need: 'host', broadcastState: false },
       );
       io.to(room.code).emit('room:ended', {
         message: 'The host ended this watch party. See you next time!',
@@ -367,7 +380,7 @@ export async function attachRedisRooms(
             room.playback = { position: 0, playing: false, rate: 1, updatedAt: Date.now() };
           }
         },
-        { control: true },
+        { need: 'add' },
       );
     });
     event('media:select', async (data) => {
@@ -378,7 +391,7 @@ export async function attachRedisRooms(
           room.currentId = data.id;
           room.playback = { position: 0, playing: false, rate: 1, updatedAt: Date.now() };
         },
-        { control: true },
+        { need: 'control' },
       );
     });
     event('media:remove', async (data) => {
@@ -390,7 +403,7 @@ export async function attachRedisRooms(
             room.playback = { position: 0, playing: false, rate: 1, updatedAt: Date.now() };
           }
         },
-        { control: true },
+        { need: 'control' },
       );
     });
     event('playback:update', async (data) => {
@@ -413,7 +426,7 @@ export async function attachRedisRooms(
             updatedAt: Date.now(),
           };
         },
-        { control: true, broadcastState: false },
+        { need: 'control', broadcastState: false },
       );
       io.to(room.code).emit('playback:state', {
         playback: room.playback,
@@ -467,13 +480,7 @@ export async function attachRedisRooms(
           if (!person || person.socketId !== socket.id) return;
           // Call status is kept: the call is peer-to-peer and survives a brief reconnect.
           Object.assign(person, { online: false, offlineSince: Date.now() });
-          if (room.hostId === id) {
-            const successor = Object.values(room.people).find((p) => p.online);
-            if (successor) {
-              room.hostId = successor.id;
-              system(room, `${successor.name} is now the host.`);
-            }
-          }
+          // The host keeps hosting while reconnecting; it passes on only if they leave for good.
         });
         if (Object.keys(room.people).length) broadcast(room);
         for (const [name, ms] of [

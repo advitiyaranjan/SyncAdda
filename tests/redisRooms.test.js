@@ -75,14 +75,45 @@ test('Redis shares room state and Socket.IO events across independent servers', 
       true,
     );
     assert.equal((await play).playback.position, 91);
+
+    // Only the host adds to the queue until they give someone access; access doesn't include the remote.
+    const media = { title: 'Guest pick', url: 'https://example.com/guest.mp4', kind: 'video' };
+    const denied = await emit(guest, 'media:add', media);
+    assert.equal(denied.ok, false);
+    assert.match(denied.error, /Ask the host/);
+    assert.equal(
+      (await emit(guest, 'room:queue-access', { id: guestIdentity.id, allowed: true })).ok,
+      false,
+    );
+    const granted = next(guest, 'room:state');
+    assert.equal(
+      (await emit(host, 'room:queue-access', { id: guestIdentity.id, allowed: true })).ok,
+      true,
+    );
+    assert.deepEqual((await granted).queueAccess, [guestIdentity.id]);
+    assert.equal((await emit(guest, 'media:add', media)).ok, true);
+    assert.equal((await emit(guest, 'playback:update', { mediaId, playing: false })).ok, false);
+    assert.equal((await emit(guest, 'media:remove', { id: mediaId })).ok, false);
+
+    // A host whose connection drops stays the host when they reconnect.
+    host.disconnect();
+    const dropped = await next(guest, 'room:state');
+    assert.equal(dropped.hostId, hostIdentity.id);
+    const back = await client(0);
+    const rejoined = await emit(back, 'room:join', {
+      code: created.room.code,
+      identity: hostIdentity,
+    });
+    assert.equal(rejoined.ok, true, rejoined.error);
+    assert.equal(rejoined.room.hostId, hostIdentity.id);
     assert.equal((await emit(guest, 'room:settings', { locked: true })).ok, false);
-    assert.equal((await emit(host, 'room:settings', { locked: true })).ok, true);
+    assert.equal((await emit(back, 'room:settings', { locked: true })).ok, true);
     assert.equal(
       (await emit(guest, 'room:join', { code: created.room.code, identity: guestIdentity })).ok,
       true,
     );
     const close = next(guest, 'room:ended');
-    assert.equal((await emit(host, 'room:close')).ok, true);
+    assert.equal((await emit(back, 'room:close')).ok, true);
     assert.match((await close).message, /ended/);
   } finally {
     clients.forEach((socket) => socket.disconnect());

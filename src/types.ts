@@ -22,6 +22,8 @@ export type Room = {
   hostId: string;
   locked: boolean;
   everyoneControls: boolean;
+  // People the host has allowed to add to the queue.
+  queueAccess: string[];
   participants: Person[];
   messages: Message[];
   playlist: Media[];
