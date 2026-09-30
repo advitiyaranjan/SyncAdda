@@ -40,6 +40,36 @@ async function expectCamera(viewer: Page, name: string) {
     .toBe(true);
 }
 
+test('voice is heard with the camera off', async ({ browser }) => {
+  const a = await person(browser, 'Asha');
+  const b = await person(browser, 'Bina', a.url());
+  for (const p of [a, b]) {
+    await p.getByRole('button', { name: 'Join call', exact: true }).click();
+    await expect(p.getByRole('button', { name: 'Leave call', exact: true })).toBeVisible();
+  }
+  for (const [viewer, name] of [
+    [a, 'Bina'],
+    [b, 'Asha'],
+  ] as const)
+    await expect
+      .poll(
+        () =>
+          viewer
+            .locator('.person-tile')
+            .filter({ hasText: name })
+            .locator('audio')
+            .evaluate(
+              (el: HTMLAudioElement) =>
+                !el.paused &&
+                (el.srcObject as MediaStream | null)
+                  ?.getAudioTracks()
+                  .some((t) => t.readyState === 'live') === true,
+            ),
+        { timeout: 30_000 },
+      )
+      .toBe(true);
+  for (const p of [a, b]) await p.context().close();
+});
 // Hosting closes WebSockets every few minutes; calls must carry on through the reconnect.
 // Needs a server that can drop every socket, such as tests/support/prod-like-server.js
 // (SYNCADDA_DROP_URL=http://localhost:3001/api/test/drop-all).

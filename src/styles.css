@@ -1439,8 +1439,7 @@ html[data-theme='dark'] {
   position: absolute;
   inset: 0;
 }
-.youtube-host,
-.youtube-shield {
+.youtube-host {
   position: absolute;
   inset: 0;
 }

@@ -128,9 +128,9 @@ export async function createYouTubeEngine(
     width: '100%',
     height: '100%',
     playerVars: {
-      controls: 0,
-      disablekb: 1,
-      fs: 0,
+      // YouTube's own controls (captions, quality, settings) are shown; Player shares the owner's
+      // play, pause, and seek from them with everyone.
+      controls: 1,
       iv_load_policy: 3,
       playsinline: 1,
       rel: 0,

@@ -49,7 +49,12 @@ test('YouTube links play in sync for everyone', async ({ page, browser }) => {
       })
       .toBe(false);
 
-  await page.getByRole('button', { name: 'Pause for everyone', exact: true }).click();
+  // The host pauses by clicking YouTube's own player, as a person would; it reaches everyone.
+  const box = (await page.locator('.youtube-host iframe').boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(
+    page.getByRole('button', { name: 'Play for everyone', exact: true }).last(),
+  ).toBeVisible();
   await expect
     .poll(() => youtubeVideo(guest).evaluate((el: HTMLVideoElement) => el.paused))
     .toBe(true);

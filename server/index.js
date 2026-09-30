@@ -41,7 +41,6 @@ app.get('/api/ice', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.json({ iceServers: await iceServers() });
 });
-});
 const dist = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../dist');
 app.use(express.static(dist));
 app.get('/{*path}', (_req, res) => res.sendFile(path.join(dist, 'index.html')));

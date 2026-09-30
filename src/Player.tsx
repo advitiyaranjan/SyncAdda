@@ -88,6 +88,34 @@ export default function Player({
   endedRef.current = () => {
     if (isHost && canControl) void next();
   };
+  // YouTube's own controls only act on this viewer's player: share the owner's play, pause, and
+  // seek with everyone, and put anyone else back on the shared position.
+  const youtubeActionRef = useRef((_state: number) => {});
+  youtubeActionRef.current = (value) => {
+    const engine = engineRef.current,
+      target = state.current;
+    if (!engine) return;
+    const playing = value === YT_STATE.PLAYING,
+      paused = value === YT_STATE.PAUSED;
+    // Our own recent jumps also move the player; don't mistake them for a seek.
+    const recentJump = Date.now() - lastSeek.current < 1500;
+    const expected =
+      target.position +
+      (target.playing
+        ? (Math.max(0, Date.now() + offset.current - target.updatedAt) / 1000) * target.rate
+        : 0);
+    const time = engine.time();
+    const changed =
+      (paused && target.playing) ||
+      (playing && !target.playing) ||
+      (!recentJump && (paused || playing) && Math.abs(time - expected) > 1.5);
+    if (!changed) return;
+    if (!canControl) return apply();
+    // Take it on right away, so the sync loop doesn't undo it before the server confirms.
+    state.current = { ...target, playing, position: time, updatedAt: Date.now() + offset.current };
+    setPlayback(state.current);
+    void update({ playing, position: time });
+  };
   const apply = useCallback(() => {
     const engine = engineRef.current,
       target = state.current;
@@ -210,6 +238,8 @@ export default function Player({
           else setLoading(false);
           if (value === YT_STATE.PLAYING) setBlocked(false);
           if (value === YT_STATE.ENDED) endedRef.current();
+          if (value === YT_STATE.PLAYING || value === YT_STATE.PAUSED)
+            youtubeActionRef.current(value);
         },
         error: (code) => {
           if (disposed) return;
@@ -345,8 +375,6 @@ export default function Player({
     <div className="player-shell" ref={containerRef}>
       <div className={`player-screen ${audio ? 'audio-screen' : ''}`}>
         <div className="youtube-host" ref={youtubeRef} hidden={!videoId} />
-        {/* Keeps clicks on our shared controls instead of YouTube's own (unsynced) ones. */}
-        {videoId && <div className="youtube-shield" onClick={screenClick} />}
         <video
           ref={videoRef}
           hidden={!!videoId}
