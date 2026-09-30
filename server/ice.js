@@ -4,8 +4,9 @@
 const STUN = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 export async function iceServers() {
-  const keyId = process.env.CLOUDFLARE_TURN_KEY_ID,
-    token = process.env.CLOUDFLARE_TURN_API_TOKEN;
+  // Trimmed: values piped into `vercel env add` can pick up a trailing newline.
+  const keyId = process.env.CLOUDFLARE_TURN_KEY_ID?.trim(),
+    token = process.env.CLOUDFLARE_TURN_API_TOKEN?.trim();
   if (keyId && token) {
     try {
       const response = await fetch(
