@@ -53,6 +53,7 @@ export default function Player({
   isHost,
   onAdd,
   notify,
+  overlay,
 }: {
   room: Room;
   canControl: boolean;
@@ -60,6 +61,8 @@ export default function Player({
   isHost: boolean;
   onAdd: () => void;
   notify: (message: string) => void;
+  // Shown over the video in fullscreen (chat and reactions).
+  overlay?: React.ReactNode;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const youtubeRef = useRef<HTMLDivElement>(null);
@@ -77,6 +80,7 @@ export default function Player({
   const [muted, setMuted] = useState(false);
   const [blocked, setBlocked] = useState(false);
   const [controlsHidden, setControlsHidden] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [playback, setPlayback] = useState(room.playback);
@@ -421,6 +425,7 @@ export default function Player({
   // In fullscreen, the controls fade out after 5 seconds without a move, tap, or key press.
   const wakeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const wake = useCallback(() => {
+    setIsFullscreen(!!containerRef.current && document.fullscreenElement === containerRef.current);
     setControlsHidden(false);
     clearTimeout(wakeTimer.current);
     if (document.fullscreenElement && document.fullscreenElement === containerRef.current)
@@ -455,6 +460,7 @@ export default function Player({
     >
       {/* YouTube's frame swallows mouse moves, so this edge brings the controls back. */}
       {controlsHidden && <div className="controls-wake" onPointerEnter={wake} />}
+      {isFullscreen && overlay}
       <div className={`player-screen ${audio ? 'audio-screen' : ''}`}>
         <div className="youtube-host" ref={youtubeRef} hidden={!videoId} />
         <video

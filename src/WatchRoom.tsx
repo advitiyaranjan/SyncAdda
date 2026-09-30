@@ -40,6 +40,7 @@ import { Brand, Modal } from './components';
 import { colorFor, initials, request, samples, socket } from './lib';
 import type { Identity, Room } from './types';
 import Player from './Player';
+import FullscreenChat from './FullscreenChat';
 import PersonTile from './PersonTile';
 import { useCall } from './useCall';
 import { useWakeLock } from './useWakeLock';
@@ -66,7 +67,7 @@ export default function WatchRoom({
   const isHost = room.hostId === identity.id;
   const canControl = connected && (isHost || room.everyoneControls);
   const canAdd = canControl || (connected && (room.queueAccess ?? []).includes(identity.id));
-  const [panel, setPanel] = useState<'chat' | 'queue' | 'people'>('chat');
+  const [panel, setPanel] = useState<'chat' | 'video' | 'queue' | 'people'>('chat');
   const [mobileView, setMobileView] = useState<'watch' | 'chat' | 'people' | 'call'>('watch');
   const [modal, setModal] = useState<'media' | 'settings' | 'leave' | 'close' | null>(null);
   const [mediaTab, setMediaTab] = useState<'link' | 'file' | 'samples'>('link');
@@ -142,6 +143,27 @@ export default function WatchRoom({
       notify((e as Error).message);
     }
   }
+  async function sendText(text: string) {
+    try {
+      await request('chat:send', { text });
+      return true;
+    } catch (e) {
+      notify((e as Error).message);
+      return false;
+    }
+  }
+  const tile = (person: (typeof room.participants)[number], silent = false) => (
+    <PersonTile
+      key={person.id}
+      person={person}
+      me={person.id === identity.id}
+      host={person.id === room.hostId}
+      stream={person.id === identity.id ? call.localStream : call.streams[person.id]}
+      speakers={speakers}
+      failed={call.failedPeers.includes(person.id)}
+      silent={silent}
+    />
+  );
   async function send(event: React.FormEvent) {
     event.preventDefault();
     if (!draft.trim() || sending) return;
@@ -279,6 +301,16 @@ export default function WatchRoom({
             canAdd={canAdd}
             onAdd={add}
             notify={notify}
+            overlay={
+              <FullscreenChat
+                messages={room.messages}
+                meId={identity.id}
+                connected={connected}
+                reactions={reactions}
+                onSend={sendText}
+                onReact={(emoji) => void action('reaction:send', { emoji })}
+              />
+            }
           />
           <div className="now-playing">
             <div>
@@ -316,17 +348,7 @@ export default function WatchRoom({
               </div>
             </div>
             <div className="people-tiles">
-              {room.participants.map((person) => (
-                <PersonTile
-                  key={person.id}
-                  person={person}
-                  me={person.id === identity.id}
-                  host={person.id === room.hostId}
-                  stream={person.id === identity.id ? call.localStream : call.streams[person.id]}
-                  speakers={speakers}
-                  failed={call.failedPeers.includes(person.id)}
-                />
-              ))}
+              {room.participants.map((person) => tile(person))}
               {room.participants.length < 8 && (
                 <button className="invite-tile" onClick={onShare}>
                   <span>
@@ -356,6 +378,15 @@ export default function WatchRoom({
             </button>
             <button
               role="tab"
+              aria-selected={panel === 'video'}
+              className={panel === 'video' ? 'active' : ''}
+              onClick={() => setPanel('video')}
+            >
+              <Video size={16} />
+              Video
+            </button>
+            <button
+              role="tab"
               aria-selected={panel === 'queue'}
               className={panel === 'queue' ? 'active' : ''}
               onClick={() => setPanel('queue')}
@@ -375,19 +406,6 @@ export default function WatchRoom({
           </div>
           {panel === 'chat' && (
             <div className="chat-panel" role="tabpanel">
-              <div className="chat-welcome">
-                <span>✳</span>
-                <h3>A place for the running commentary.</h3>
-                <p>
-                  The hot takes. The inside jokes.
-                  <br />
-                  The “wait, did you see that?”
-                </p>
-                <div>
-                  <LockKeyhole size={11} />
-                  Only the people in this room
-                </div>
-              </div>
               <div className="chat-messages" aria-live="polite" aria-relevant="additions">
                 {room.messages.map((message) =>
                   message.system ? (
@@ -469,6 +487,17 @@ export default function WatchRoom({
                 </form>
                 <small>Good company. Great commentary.</small>
               </div>
+            </div>
+          )}
+          {panel === 'video' && (
+            // Friends' cameras beside the movie. Their sound already plays from the main tiles.
+            <div className="video-panel" role="tabpanel">
+              {room.participants.map((person) => tile(person, true))}
+              {!call.inCall && (
+                <p className="video-panel-note">
+                  Join the call to see and hear each other while you watch.
+                </p>
+              )}
             </div>
           )}
           {panel === 'queue' && (

@@ -9,6 +9,7 @@ export default function PersonTile({
   host,
   speakers,
   failed,
+  silent = false,
 }: {
   person: Person;
   stream?: MediaStream | null;
@@ -16,6 +17,8 @@ export default function PersonTile({
   host: boolean;
   speakers: boolean;
   failed?: boolean;
+  // A second view of someone (e.g. the Video tab) plays no sound, so nobody is heard twice.
+  silent?: boolean;
 }) {
   const video = useRef<HTMLVideoElement>(null);
   const audio = useRef<HTMLAudioElement>(null);
@@ -33,13 +36,13 @@ export default function PersonTile({
   useEffect(() => {
     const el = audio.current;
     if (!el) return;
-    const tracks = me ? [] : stream?.getAudioTracks() || [];
+    const tracks = me || silent ? [] : stream?.getAudioTracks() || [];
     el.srcObject = tracks.length ? new MediaStream(tracks) : null;
     if (tracks.length)
       el.play()
         .then(() => setNeedsAudio(false))
         .catch(() => setNeedsAudio(true));
-  }, [stream, me]);
+  }, [stream, me, silent]);
   // Phones (iPhones always) only start call sound from a tap, and this tile may be off-screen,
   // so any tap or key press anywhere retries it.
   useEffect(() => {
@@ -88,7 +91,7 @@ export default function PersonTile({
         muted
         className={`${person.camera && stream ? 'has-camera' : ''} ${me ? 'mirrored' : ''}`}
       />
-      <audio ref={audio} autoPlay muted={!speakers} />
+      {!silent && <audio ref={audio} autoPlay muted={!speakers} />}
       {(!person.camera || !stream) && <span className="tile-avatar">{initials(person.name)}</span>}
       <span className="tile-top">
         {host && <Crown size={13} />}

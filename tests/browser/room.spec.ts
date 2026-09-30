@@ -196,6 +196,43 @@ test('the player fills the screen height, and fullscreen controls hide after 5 s
   await expect(shell).not.toHaveClass(/controls-hidden/);
 });
 
+test('chat fills its panel, the Video tab shows friends, and fullscreen has a see-through chat', async ({
+  page,
+  browser,
+}) => {
+  await enter(page, 'Asha');
+  const guest = await (await browser.newContext()).newPage();
+  await enter(guest, 'Bina', page.url());
+  await expect(page.getByText('A place for the running commentary.')).toHaveCount(0);
+
+  // The Video tab: everyone's tile, video only (their sound plays from the main tiles).
+  await page.getByRole('tab', { name: 'Video' }).click();
+  const tiles = page.locator('.video-panel .person-tile');
+  await expect(tiles).toHaveCount(2);
+  await expect(page.locator('.video-panel audio')).toHaveCount(0);
+
+  // Fullscreen: chat over the video, reactions, and a way to tuck it away.
+  await addVideo(page, 'Movie night');
+  await page.getByRole('button', { name: 'Fullscreen' }).click();
+  await expect.poll(() => page.evaluate(() => !!document.fullscreenElement)).toBe(true);
+  const fsChat = page.locator('.fs-chat');
+  await expect(fsChat).toBeVisible();
+  await page.getByLabel('Chat while watching').fill('Best scene!');
+  await page.keyboard.press('Enter');
+  await expect(guest.getByText('Best scene!', { exact: true })).toBeVisible();
+  await expect(fsChat.getByText('Best scene!')).toBeVisible();
+  await guest.getByRole('textbox', { name: 'Message your room' }).fill('Agreed');
+  await guest.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(fsChat.getByText('Agreed')).toBeVisible();
+  await fsChat.getByRole('button', { name: 'React 🔥' }).click();
+  await expect(page.locator('.fs-reactions')).toContainText('🔥');
+  await page.getByRole('button', { name: 'Hide chat' }).click();
+  await expect(fsChat).toHaveCount(0);
+  await page.getByRole('button', { name: 'Show chat' }).click();
+  await expect(fsChat).toBeVisible();
+  await guest.context().close();
+});
+
 test('only the host controls media, and can let someone add to the queue', async ({
   page,
   browser,

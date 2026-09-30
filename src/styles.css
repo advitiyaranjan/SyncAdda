@@ -2105,36 +2105,6 @@ html[data-theme='dark'] {
   flex-direction: column;
   min-height: 0;
 }
-.chat-welcome {
-  text-align: center;
-  padding: 24px 18px 19px;
-  border-bottom: 1px solid #2b3823;
-}
-.chat-welcome > span {
-  font-size: 32px;
-  color: #8d9e76;
-  line-height: 1;
-}
-.chat-welcome h3 {
-  font-size: 11px;
-  font-weight: 500;
-  color: #aabc96;
-  margin: 13px 0 8px;
-}
-.chat-welcome p {
-  font-size: 10px;
-  color: #6c8457;
-  line-height: 1.8;
-  margin: 0 0 15px;
-}
-.chat-welcome > div {
-  font-size: 7px;
-  color: #698251;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 5px;
-}
 .chat-messages {
   padding: 20px 17px 15px;
   overflow: auto;
@@ -3951,20 +3921,6 @@ input[type='file']::file-selector-button {
   .sidebar-tabs button {
     font-size: 12px;
   }
-  .chat-welcome {
-    padding: 20px 18px 15px;
-  }
-  .chat-welcome h3 {
-    font-size: 12px;
-  }
-  .chat-welcome > span {
-    font-size: 26px;
-  }
-  .chat-welcome p {
-    font-size: 10px;
-    line-height: 1.7;
-    margin-bottom: 11px;
-  }
   .chat-messages {
     padding: 20px;
     min-height: 60px;
@@ -4308,9 +4264,6 @@ input[type='file']::file-selector-button {
   .message-meta strong {
     font-size: 11px;
   }
-  .chat-welcome p {
-    color: #8b9e79;
-  }
   .system-message {
     font-size: 9px;
     color: #83976f;
@@ -4431,5 +4384,181 @@ input[type='file']::file-selector-button {
   }
   .system-message {
     color: #8ca579;
+  }
+}
+
+/* Video tab: friends' cameras beside the movie. */
+.video-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  box-sizing: border-box;
+  align-content: start;
+  gap: 10px;
+  padding: 14px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+}
+.video-panel .person-tile {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+.video-panel-note {
+  font-size: 11px;
+  color: #8b9e79;
+  text-align: center;
+  margin: 6px 0 0;
+  line-height: 1.6;
+}
+
+/* Fullscreen: see-through chat and reactions over the video, like a live stream. */
+.fs-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 8;
+}
+.fs-overlay button,
+.fs-overlay input,
+.fs-chat {
+  pointer-events: auto;
+}
+.fs-toggle {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: #0008;
+  backdrop-filter: blur(6px);
+  transition: opacity 0.3s;
+}
+.controls-hidden .fs-toggle {
+  opacity: 0;
+}
+.fs-chat {
+  position: absolute;
+  right: 14px;
+  bottom: 96px;
+  max-height: calc(100% - 170px);
+  width: min(340px, 42vw);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #0a0f0b73;
+  backdrop-filter: blur(5px);
+  color: #f1f5ec;
+}
+.fs-messages {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 6px;
+  scrollbar-width: none;
+  overflow-wrap: anywhere;
+  mask-image: linear-gradient(transparent, #000 18%);
+}
+.fs-messages p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  text-shadow: 0 1px 2px #000a;
+}
+.fs-messages strong {
+  color: #f0b58f;
+  font-weight: 650;
+  margin-right: 4px;
+}
+.fs-messages p.own strong {
+  color: #b9d99a;
+}
+.fs-messages .fs-system {
+  font-size: 11px;
+  color: #cbd5c0b3;
+}
+.fs-emoji {
+  display: flex;
+  gap: 4px;
+}
+.fs-emoji button {
+  font-size: 18px;
+  padding: 3px 5px;
+  border-radius: 6px;
+}
+.fs-emoji button:hover:not(:disabled) {
+  background: #ffffff1f;
+}
+.fs-composer {
+  display: flex;
+  gap: 6px;
+}
+.fs-composer input {
+  flex: 1;
+  background: #ffffff1a;
+  border: 1px solid #ffffff2e;
+  color: #fff;
+  padding: 9px 11px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.fs-composer input::placeholder {
+  color: #ffffff8c;
+}
+.fs-composer button {
+  width: 36px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: var(--orange);
+}
+.fs-composer button:disabled {
+  opacity: 0.45;
+}
+.fs-reactions > span {
+  position: absolute;
+  bottom: 110px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  animation: fs-float 3.4s ease-out forwards;
+}
+.fs-reactions > span > span {
+  font-size: 34px;
+}
+.fs-reactions small {
+  font-size: 11px;
+  color: #fff;
+  text-shadow: 0 1px 2px #000;
+}
+@keyframes fs-float {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-260px);
+    opacity: 0;
+  }
+}
+@media (max-width: 700px) {
+  .fs-chat {
+    width: min(280px, 62vw);
+    bottom: 84px;
+    max-height: calc(100% - 150px);
+  }
+  .fs-messages p {
+    font-size: 12px;
   }
 }
