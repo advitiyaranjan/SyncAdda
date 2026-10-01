@@ -6,7 +6,14 @@ export type Person = {
   camera: boolean;
   inCall: boolean;
 };
-export type Media = { id: string; title: string; url: string; kind: 'video' | 'audio' };
+export type Media = {
+  id: string;
+  title: string;
+  url: string;
+  kind: 'video' | 'audio';
+  // Who added it. A file played without uploading streams from their device.
+  by?: string;
+};
 export type Message = {
   id: string;
   name: string;

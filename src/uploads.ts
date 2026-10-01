@@ -17,8 +17,9 @@ const extensionTypes: Record<string, string> = {
   ogg: 'audio/ogg',
   opus: 'audio/ogg',
 };
-const mediaType = (file: File) =>
-  file.type || extensionTypes[file.name.split('.').pop()?.toLowerCase() || ''] || '';
+export const nameType = (name: string) =>
+  extensionTypes[name.split('.').pop()?.toLowerCase() || ''] || '';
+const mediaType = (file: File) => file.type || nameType(file.name);
 
 export const fileKind = (file: File) =>
   /^(video|audio)\//.exec(mediaType(file))?.[1] as 'video' | 'audio' | undefined;

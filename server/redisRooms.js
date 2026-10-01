@@ -8,6 +8,7 @@ import {
   STATE_MESSAGES,
   callSchema,
   deniedMessage,
+  fileSignalSchema,
   permitted,
   positionAt,
 } from './rooms.js';
@@ -25,7 +26,7 @@ const mediaSchema = z.object({
     .string()
     .url()
     .max(2048)
-    // A web link, or a file each person plays from their own device (its name and size).
+    // A web link, or a file played from the device of whoever added it (its name and size).
     .refine((url) => /^https?:\/\//i.test(url) || /^local:[^#]+#\d+$/.test(url)),
   kind: z.enum(['video', 'audio']),
 });
@@ -165,8 +166,8 @@ export async function attachRedisRooms(
               count = 0;
               signals = 0;
             }
-            // Call setup sends a burst of ICE candidates per peer, so it gets its own budget.
-            if (name === 'call:signal' ? ++signals > 800 : ++count > 140)
+            // Connection setup sends a burst of ICE candidates per peer, so it gets its own budget.
+            if (name.endsWith(':signal') ? ++signals > 800 : ++count > 140)
               throw new Error('A little too fast. Please try again in a moment.');
             const result = await handler(data);
             reply({ ok: true, ...result });
@@ -180,8 +181,8 @@ export async function attachRedisRooms(
             });
           }
         };
-        // Relay call signals in the order they were sent; WebRTC negotiation depends on it.
-        if (name === 'call:signal') signalQueue = signalQueue.then(run);
+        // Relay signals in the order they were sent; WebRTC negotiation depends on it.
+        if (name.endsWith(':signal')) signalQueue = signalQueue.then(run);
         else void run();
       });
     const current = async (need) => {
@@ -394,7 +395,7 @@ export async function attachRedisRooms(
       });
     });
     event('media:add', async (data) => {
-      const media = { ...mediaSchema.parse(data), id: randomUUID() };
+      const media = { ...mediaSchema.parse(data), id: randomUUID(), by: socket.data.personId };
       await change(
         (room) => {
           if (room.playlist.length >= 40)
@@ -493,6 +494,14 @@ export async function attachRedisRooms(
         description: input.description,
         candidate: input.candidate,
       });
+    });
+    event('file:signal', async (data) => {
+      const { to, ...signal } = fileSignalSchema.parse(data);
+      const room = await current(),
+        target = room.people[to];
+      if (!target?.online || to === socket.data.personId)
+        throw new Error('That person isn’t here right now.');
+      io.to(target.socketId).emit('file:signal', { from: socket.data.personId, ...signal });
     });
     event('clock:ping', () => ({ serverTime: Date.now() }));
     socket.on('disconnect', async () => {

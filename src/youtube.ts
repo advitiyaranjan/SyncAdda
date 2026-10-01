@@ -296,10 +296,14 @@ export async function createYouTubeEngine(
           resolve = a;
           reject = b;
         });
-        // Older embeds may omit onAutoplayBlocked. Buffering is not a playback failure.
+        // Older embeds may omit onAutoplayBlocked. Buffering is not a playback failure, and on a
+        // slow connection the video can take a while to get as far as buffering: someone joining
+        // part-way through gets one more wait before it counts as blocked.
+        let waits = 0;
         const check = () => {
           if (!pending) return;
-          if (state() === YT_STATE.BUFFERING) pending.timer = window.setTimeout(check, 8000);
+          if (state() === YT_STATE.BUFFERING || (state() === YT_STATE.UNSTARTED && !waits++))
+            pending.timer = window.setTimeout(check, 8000);
           else pending.done(state() === YT_STATE.PLAYING);
         };
         const timer = window.setTimeout(check, 8000);

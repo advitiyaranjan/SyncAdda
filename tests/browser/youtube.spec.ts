@@ -63,17 +63,13 @@ test('YouTube links play in sync for everyone', async ({ page, browser }) => {
   // Quality is picked from our controls, for this device only.
   const quality = page.getByRole('combobox', { name: 'Video quality on this device' });
   await expect(quality).toHaveValue('auto');
-  for (const [level, height] of [
-    ['hd1080', 1080],
-    ['large', 480],
-  ] as const) {
-    await quality.selectOption(level);
-    await expect
-      .poll(() => youtubeVideo(page).evaluate((el: HTMLVideoElement) => el.videoHeight), {
-        timeout: 30_000,
-      })
-      .toBe(height);
-  }
+  // YouTube has the last word (on a slow connection it stays under what was asked for), so this
+  // checks the direction: a high choice gives HD, and a low one brings it back down.
+  const videoHeight = () => youtubeVideo(page).evaluate((el: HTMLVideoElement) => el.videoHeight);
+  await quality.selectOption('hd1080');
+  await expect.poll(videoHeight, { timeout: 30_000 }).toBeGreaterThanOrEqual(720);
+  await quality.selectOption('large');
+  await expect.poll(videoHeight, { timeout: 30_000 }).toBeLessThanOrEqual(480);
   // Only this device changed.
   await expect(guest.getByRole('combobox', { name: 'Video quality on this device' })).toHaveValue(
     'auto',

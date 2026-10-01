@@ -29,7 +29,7 @@ Open **http://localhost:5173**. Vite serves the frontend and proxies Socket.IO a
 
 Paste a **direct, publicly accessible** media URL, such as `.mp4`, `.webm`, `.mp3`, or `.m3u8`. Browser codec support still applies. For reliable seeking, file servers must support byte-range requests. HLS sources must allow cross-origin requests. Use HTTPS media on an HTTPS deployment.
 
-**Play without uploading:** a video or song of any size can be played straight from your device. Nothing is uploaded; the room shares only the file's name and size, everyone else is asked to choose their own copy of the same file, and playback stays in sync. YouTube links play through YouTube's embedded player (videos that disallow embedding won't play). DRM-protected sources and subscription streaming services are not supported.
+**Play without uploading:** a video or song of any size can be played straight from your device. Nothing is uploaded and nobody waits: it starts at once on the sharer's device and streams from there to everyone else as they watch, peer to peer over a WebRTC data channel (through the same ICE/TURN servers as calls), in sync. Each viewer's player fetches only the bytes it needs, via a small service worker (`public/stream-sw.js`), so seeking works. The sharer has to stay in the room with the page open; if they're away, viewers wait, or play their own copy of the same file. Streaming is limited by the sharer's upload speed, and needs HTTPS (or localhost). YouTube links play through YouTube's embedded player (videos that disallow embedding won't play). Vimeo, Facebook, and Twitch links play the same way through those sites' embedded players (`src/embeds.ts`); X and Instagram players can't be controlled from outside, so they can't be synced. DRM-protected sources and subscription streaming services are not supported.
 
 **From your device:** a video or song up to 100 MB can be uploaded once to Vercel Blob (straight from the browser, never through the app server) and streamed to everyone in the room. Uploads are deleted when removed from the queue or when the room closes, and a daily cron (`/api/cleanup-uploads`) removes anything older than 24 hours left by rooms that expired. Uploads need `BLOB_READ_WRITE_TOKEN`, which Vercel provides when a Blob store is connected to the project.
 
@@ -99,6 +99,7 @@ src/App.tsx             Session lifecycle, entry and invitation dialogs
 src/Landing.tsx         Home page
 src/WatchRoom.tsx       Room, chat, queue, participants, host controls
 src/Player.tsx          Shared media player and clock correction
+src/fileShare.ts        Peer-to-peer streaming of files played without uploading
 src/useCall.ts          WebRTC signaling, tracks, and call lifecycle
 src/PersonTile.tsx      Participant video/audio and speaking indicator
 server/rooms.js         Room state, validation, authorization, socket events

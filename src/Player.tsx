@@ -14,6 +14,8 @@ import {
 import type Hls from 'hls.js';
 import { request, socket, time } from './lib';
 import { chooseLocal, chosenLocal, localFile, onLocalChange } from './localFiles';
+import { createEmbedEngine, embedFor } from './embeds';
+import { onStreamChange, shareFiles, streamWaiting, watchFile } from './fileShare';
 import type { Engine, Playback, Room } from './types';
 import {
   YT_STATE,
@@ -58,6 +60,7 @@ const QUALITY_LABELS: Record<string, string> = {
 
 export default function Player({
   room,
+  meId,
   canControl,
   canAdd,
   isHost,
@@ -66,6 +69,7 @@ export default function Player({
   overlay,
 }: {
   room: Room;
+  meId: string;
   canControl: boolean;
   canAdd: boolean;
   isHost: boolean;
@@ -95,6 +99,19 @@ export default function Player({
     blockedRef.current = value;
     setBlockedState(value);
   }, []);
+  // Playing without sound until the first tap, where the browser wouldn't start it with sound.
+  const [silenced, setSilencedState] = useState(false);
+  const silencedRef = useRef(false);
+  const setSilenced = useCallback((value: boolean) => {
+    silencedRef.current = value;
+    setSilencedState(value);
+  }, []);
+  useEffect(() => {
+    if (!silenced) return;
+    const tapped = () => setSilenced(false);
+    document.addEventListener('pointerdown', tapped);
+    return () => document.removeEventListener('pointerdown', tapped);
+  }, [silenced, setSilenced]);
   const [controlsHidden, setControlsHidden] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -107,16 +124,58 @@ export default function Player({
   qualityRef.current = quality;
   const media = room.playlist.find((m) => m.id === room.currentId);
   const videoId = media ? youtubeId(media.url) : null;
-  // A file each person plays from their own device: this device's copy, once it's been chosen.
+  // Another site's embedded player (Vimeo, Facebook, Twitch), driven the same way as YouTube's.
+  const embed = media && !videoId ? embedFor(media.url) : null;
+  const embedded = !!videoId || !!embed;
+  // A file played without uploading: this device's copy, if it has one (whoever added it does).
   const local = media ? localFile(media.url) : null;
   const localSource = useSyncExternalStore(onLocalChange, () =>
     media ? chosenLocal(media.url) : undefined,
   );
-  const needsFile = !!local && !localSource;
+  // Otherwise it streams here from the device of whoever added it, while everyone watches.
+  const sharerId = local && media?.by !== meId ? media?.by : undefined;
+  const sharer = room.participants.find((p) => p.id === sharerId);
+  const [stream, setStream] = useState<{ id: string; src: string | null }>();
+  // Undefined while it's being set up, and null where this browser can't stream from a friend.
+  const streamSrc = !localSource && stream?.id === media?.id ? stream?.src : undefined;
+  const unreachable = useSyncExternalStore(onStreamChange, () =>
+    media ? streamWaiting(media.id) : false,
+  );
+  const away = !!streamSrc && loading && unreachable;
+  const needsFile = !!local && !localSource && (!sharerId || streamSrc === null || away || !!error);
+  const filePrompt = !local
+    ? null
+    : !sharerId && media?.by
+      ? {
+          title: 'Choose the file again to carry on.',
+          text: `“${local.name}” streams to everyone from this device, so it has to be open here. Nothing is uploaded.`,
+        }
+      : away && sharer
+        ? {
+            title: `Waiting for ${sharer.name}’s device…`,
+            text: `“${local.name}” streams from ${sharer.name}’s device, which can’t be reached right now. It carries on by itself when they’re back. If you have the file too, choose it to play your own copy.`,
+          }
+        : away
+          ? {
+              title: 'The person sharing this has left.',
+              text: `“${local.name}” was streaming from their device. If you have the file too, choose it to keep watching.`,
+            }
+          : error
+            ? {
+                title: 'We couldn’t stream that one here.',
+                text: `If “${local.name}” is on this device too, choose it to play your own copy.`,
+              }
+            : {
+                title: 'This one plays from your own device.',
+                text: `Choose “${local.name}” on this device to watch along. Nothing is uploaded, and it stays in sync with everyone.`,
+              };
+  const streamRetries = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [attempt, setAttempt] = useState(0);
   const mediaIdRef = useRef(room.currentId);
   mediaIdRef.current = room.currentId;
   const volumeRef = useRef({ volume, muted });
-  volumeRef.current = { volume, muted };
+  volumeRef.current = { volume, muted: muted || silenced };
   const endedRef = useRef(() => {});
   endedRef.current = () => {
     if (isHost && canControl) void next();
@@ -187,6 +246,19 @@ export default function Player({
       playAttempt.current = engine;
       engine
         .play()
+        .catch(() => {
+          // A browser that won't start sound without a tap (someone who has just joined, say)
+          // still starts a silent video: join in silently, and ask for a tap for the sound.
+          if (
+            silencedRef.current ||
+            engineRef.current !== engine ||
+            document.visibilityState !== 'visible'
+          )
+            throw new Error('Playback was blocked.');
+          setSilenced(true);
+          engine.setVolume(volumeRef.current.volume, true);
+          return engine.play();
+        })
         .then(() => {
           if (engineRef.current === engine) setBlocked(false);
         })
@@ -288,6 +360,29 @@ export default function Player({
       clearInterval(driftTimer);
     };
   }, [apply]);
+  // Friends fetch a file that's open on this device from it, and this device does the same.
+  useEffect(() => shareFiles(), []);
+  useEffect(() => {
+    streamRetries.current = 0;
+    if (!media || !sharerId || localSource) return;
+    const id = media.id;
+    let cancelled = false,
+      stop = () => {};
+    watchFile(media, sharerId)
+      .then((watching) => {
+        if (cancelled) return watching.stop();
+        stop = watching.stop;
+        setStream({ id, src: watching.src });
+      })
+      .catch(() => {
+        if (!cancelled) setStream({ id, src: null });
+      });
+    return () => {
+      cancelled = true;
+      stop();
+      setStream(undefined);
+    };
+  }, [media?.id, media?.url, sharerId, localSource]);
   useEffect(() => {
     const el = videoRef.current;
     clearTimeout(seekTimer.current);
@@ -307,42 +402,48 @@ export default function Player({
       youtube: YouTubeEngine | undefined,
       poll: ReturnType<typeof setInterval> | undefined,
       disposed = false;
-    if (!videoId) engineRef.current = videoEngine(el);
-    if (videoId) {
-      createYouTubeEngine(
-        host,
-        videoId,
-        {
-          ready: (engine) => {
-            if (disposed) return;
-            engineRef.current = engine;
-            engine.setVolume(volumeRef.current.volume, volumeRef.current.muted);
-            engine.setQuality?.(qualityRef.current);
-            setLoading(false);
-            apply();
-          },
-          state: (value, automatic) => {
-            if (disposed) return;
-            if (value === YT_STATE.BUFFERING) setLoading(true);
-            else setLoading(false);
-            if (value === YT_STATE.PLAYING) setBlocked(false);
-            if (value === YT_STATE.ENDED) endedRef.current();
-            if (value === YT_STATE.PAUSED) resumeHidden();
-            if (!automatic && (value === YT_STATE.PLAYING || value === YT_STATE.PAUSED))
-              youtubeActionRef.current(value);
-          },
-          blocked: () => {
-            if (disposed) return;
-            setLoading(false);
-            if (document.visibilityState === 'visible') setBlocked(true);
-          },
-          error: (code) => {
-            if (disposed) return;
-            setLoading(false);
-            setError(youtubeError(code));
-          },
+    if (!embedded) engineRef.current = videoEngine(el);
+    if (embedded) {
+      const events = {
+        ready: (engine: YouTubeEngine) => {
+          if (disposed) return;
+          engineRef.current = engine;
+          engine.setVolume(volumeRef.current.volume, volumeRef.current.muted);
+          engine.setQuality?.(qualityRef.current);
+          setLoading(false);
+          apply();
         },
-        controller.signal,
+        state: (value: number, automatic: boolean) => {
+          if (disposed) return;
+          if (value === YT_STATE.BUFFERING) setLoading(true);
+          else setLoading(false);
+          // Started by a tap on YouTube itself after being blocked: they're joining the room
+          // where it is now, not moving everyone to where this device had got to.
+          const joining = value === YT_STATE.PLAYING && blockedRef.current;
+          if (value === YT_STATE.PLAYING) setBlocked(false);
+          if (value === YT_STATE.ENDED) endedRef.current();
+          if (value === YT_STATE.PAUSED) resumeHidden();
+          if (joining) {
+            lastSeek.current = 0;
+            apply();
+          } else if (!automatic && (value === YT_STATE.PLAYING || value === YT_STATE.PAUSED))
+            youtubeActionRef.current(value);
+        },
+        blocked: () => {
+          if (disposed) return;
+          setLoading(false);
+          // The first time, it's tried again without sound before anyone is asked to tap.
+          if (document.visibilityState === 'visible' && silencedRef.current) setBlocked(true);
+        },
+        error: (code: number | string) => {
+          if (disposed) return;
+          setLoading(false);
+          setError(typeof code === 'number' ? youtubeError(code) : code);
+        },
+      };
+      (videoId
+        ? createYouTubeEngine(host, videoId, events, controller.signal)
+        : createEmbedEngine(host, embed!, events, controller.signal)
       )
         .then((engine) => {
           if (disposed) engine.destroy();
@@ -352,7 +453,7 @@ export default function Player({
           if (!disposed) {
             setLoading(false);
             setError(
-              'YouTube couldn’t load. Check your connection or turn off any blocker for this site, then try again.',
+              'The player couldn’t load. Check your connection or turn off any blocker for this site, then try again.',
             );
           }
         });
@@ -397,15 +498,13 @@ export default function Player({
             setError('The live-stream player could not load. Please refresh and try again.');
           }
         });
-    } else if (!local) {
-      el.src = media.url;
+    } else if (!local || localSource || streamSrc) {
+      el.src = localSource || streamSrc || media.url;
       el.load();
-    } else if (localSource) {
-      el.src = localSource;
-      el.load();
-    } else setLoading(false);
+    } else setLoading(!!sharerId && streamSrc === undefined);
     return () => {
       clearTimeout(seekTimer.current);
+      clearTimeout(retryTimer.current);
       clearInterval(poll);
       disposed = true;
       controller.abort();
@@ -416,10 +515,10 @@ export default function Player({
       el.removeAttribute('src');
       el.load();
     };
-  }, [media?.url, media?.id, localSource]);
+  }, [media?.url, media?.id, localSource, streamSrc, attempt]);
   useEffect(() => {
-    engineRef.current?.setVolume(volume, muted);
-  }, [volume, muted, media?.id]);
+    engineRef.current?.setVolume(volume, muted || silenced);
+  }, [volume, muted, silenced, media?.id]);
   // Lock-screen and notification controls. They also help the browser keep the movie or song
   // playing while the page is in the background.
   const updateRef = useRef(update);
@@ -502,7 +601,12 @@ export default function Player({
         setBlocked(false);
       } catch {
         setBlocked(true);
-        notify('Your browser could not play this source. Try another media link.');
+        // The shield is off YouTube while blocked: some phones only start from a tap on it.
+        notify(
+          embedded
+            ? 'Tap the video itself to start it on this device.'
+            : 'Your browser could not play this source. Try another media link.',
+        );
       }
       return;
     }
@@ -544,7 +648,7 @@ export default function Player({
       notify('Fullscreen is unavailable in this browser.');
     }
   }
-  const audio = media?.kind === 'audio' && !videoId;
+  const audio = media?.kind === 'audio' && !embedded;
   const screenClick = () => {
     if (canControl || blocked) void toggle();
   };
@@ -560,13 +664,13 @@ export default function Player({
       {controlsHidden && <div className="controls-wake" onPointerEnter={wake} />}
       {isFullscreen && overlay}
       <div className={`player-screen ${audio ? 'audio-screen' : ''}`}>
-        <div className="youtube-host" ref={youtubeRef} hidden={!videoId} />
+        <div className="youtube-host" ref={youtubeRef} hidden={!embedded} />
         {/* Keeps taps off YouTube's own player, so it behaves like the <video> below. While
             playback is blocked it steps aside: some phones only start after a tap on YouTube. */}
-        {videoId && !blocked && <div className="youtube-shield" onClick={screenClick} />}
+        {embedded && !blocked && <div className="youtube-shield" onClick={screenClick} />}
         <video
           ref={videoRef}
-          hidden={!!videoId}
+          hidden={embedded}
           preload="auto"
           playsInline
           onLoadedMetadata={(e) => {
@@ -585,7 +689,13 @@ export default function Player({
             if (isHost && canControl) void next();
           }}
           onError={() => {
-            if (media && videoRef.current?.getAttribute('src')) {
+            if (!media || !videoRef.current?.getAttribute('src')) return;
+            // A stream from a friend's device can be cut short (their connection, the browser
+            // tidying up): start it again before giving up.
+            if (streamSrc && streamRetries.current < 2) {
+              streamRetries.current++;
+              retryTimer.current = setTimeout(() => setAttempt((n) => n + 1), 1500);
+            } else {
               setLoading(false);
               setError(
                 local
@@ -650,13 +760,17 @@ export default function Player({
             <Play size={29} fill="currentColor" />
           </button>
         )}
-        {loading && !error && media && (
+        {loading && !error && media && !needsFile && (
           <div className="player-buffer">
             <LoaderCircle className="spin" size={28} />
-            <span>Getting your moment ready…</span>
+            <span>
+              {streamSrc && sharer
+                ? `Streaming from ${sharer.name}’s device…`
+                : 'Getting your moment ready…'}
+            </span>
           </div>
         )}
-        {error && (
+        {error && !needsFile && (
           <div className="player-error">
             <Film size={28} />
             <h3>We couldn’t play that one.</h3>
@@ -668,14 +782,11 @@ export default function Player({
             )}
           </div>
         )}
-        {local && needsFile && (
+        {local && filePrompt && needsFile && (
           <div className="player-error">
             <Film size={28} />
-            <h3>This one plays from your own device.</h3>
-            <p>
-              Choose “{local.name}” on this device to watch along. Nothing is uploaded, and it stays
-              in sync with everyone.
-            </p>
+            <h3>{filePrompt.title}</h3>
+            <p>{filePrompt.text}</p>
             <label className="button secondary">
               Choose the file
               <input
@@ -693,10 +804,16 @@ export default function Player({
             </label>
           </div>
         )}
-        {blocked && !error && !needsFile && (
+        {blocked && !error && !needsFile && media && (
           <button className="autoplay-prompt" onClick={toggle}>
             <Play size={16} />
             Tap to join playback on this device
+          </button>
+        )}
+        {silenced && !blocked && !error && !needsFile && media && playback.playing && (
+          <button className="autoplay-prompt" onClick={() => setSilenced(false)}>
+            <Volume2 size={16} />
+            Tap for sound
           </button>
         )}
         {media && (

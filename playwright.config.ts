@@ -23,6 +23,8 @@ export default defineConfig({
   webServer: {
     command: 'npm run dev',
     url: 'http://localhost:5173',
+    // Every test creates a room, from one address, faster than a person is allowed to.
+    env: { ROOM_CREATE_LIMIT: '1000' },
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
   },

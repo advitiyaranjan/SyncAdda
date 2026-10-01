@@ -197,7 +197,8 @@ test('blocked phone waits for a tap then joins the current timeline without rest
     await expect
       .poll(async () => Math.abs((await shownTime(page)) - (await shownTime(phone))))
       .toBeLessThanOrEqual(1);
-    expect((await read(phone)).plays).toBe(2);
+    // Once with sound and once without before asking for the tap, then the tap itself.
+    expect((await read(phone)).plays).toBe(3);
     await expect(phone.locator('.autoplay-prompt')).toHaveCount(0);
   } finally {
     await context.close();

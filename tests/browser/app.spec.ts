@@ -263,7 +263,7 @@ test('the shared queue advances once at the end, plays a file from the device, a
   await expect(page.locator('.floating-reactions')).toContainText('Advitiya');
 });
 
-test('a file played without uploading is chosen by each person and stays in sync', async ({
+test('a file played without uploading streams to friends from the device it is on, in sync', async ({
   page,
   browser,
 }) => {
@@ -279,23 +279,68 @@ test('a file played without uploading is chosen by each person and stays in sync
   await page.getByLabel('Video or song').setInputFiles(fixture);
   await page.getByRole('button', { name: 'Add to our queue' }).click();
   await expect(page.getByRole('heading', { name: 'flower', exact: true })).toBeVisible();
-  // Nothing left this device.
+
+  // The guest isn't asked for the file: it arrives from the sharer's device.
+  const video = (p: Page) => p.locator('.player-screen video');
+  await expect
+    .poll(
+      () =>
+        video(guest).evaluate(
+          (el: HTMLVideoElement) => el.src.includes('/p2p/') && el.readyState >= 3,
+        ),
+      { timeout: 30_000 },
+    )
+    .toBe(true);
+  await expect(guest.getByText('on this device')).toHaveCount(0);
+  expect(await video(guest).evaluate((el: HTMLVideoElement) => el.duration)).toBeGreaterThan(4);
+  // Nothing was uploaded anywhere.
   expect(requests.filter((r) => !r.startsWith('GET ') && !r.includes('/socket.io/'))).toEqual([]);
 
-  // The guest is asked for their own copy, by name.
-  await expect(guest.getByRole('heading', { name: 'flower', exact: true })).toBeVisible();
-  await expect(guest.getByText('Choose “flower.mp4” on this device')).toBeVisible();
+  await page.getByRole('slider', { name: 'Seek for everyone' }).fill('2');
+  await expect
+    .poll(() => video(guest).evaluate((el: HTMLVideoElement) => Math.abs(el.currentTime - 2) < 0.3))
+    .toBe(true);
   await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
-  await guest.getByLabel('Choose the file').setInputFiles(fixture);
-  await expect(guest.getByText('Choose “flower.mp4” on this device')).toHaveCount(0);
-  const video = (p: Page) => p.locator('.player-screen video');
   for (const p of [page, guest])
     await expect
-      .poll(() => video(p).evaluate((el: HTMLVideoElement) => !el.paused && el.currentTime > 0))
+      .poll(() => video(p).evaluate((el: HTMLVideoElement) => !el.paused && el.currentTime > 2))
       .toBe(true);
   const [mine, theirs] = await Promise.all(
     [page, guest].map((p) => video(p).evaluate((el: HTMLVideoElement) => el.currentTime)),
   );
   expect(Math.abs(mine - theirs)).toBeLessThan(0.5);
+  await context.close();
+});
+
+test('when the sharer is away, someone with the same file can play their own copy', async ({
+  page,
+  browser,
+}) => {
+  const requests: string[] = [];
+  page.on('request', (request) => requests.push(`${request.method()} ${request.url()}`));
+  const url = await createRoom(page);
+  const context = await browser.newContext();
+  const guest = await context.newPage();
+  await joinRoom(guest, url);
+
+  await page.getByRole('button', { name: 'Choose something to watch' }).click();
+  await page.getByRole('button', { name: 'Play without uploading' }).click();
+  await page.getByLabel('Video or song').setInputFiles(fixture);
+  await page.getByRole('button', { name: 'Add to our queue' }).click();
+  await expect(page.getByRole('heading', { name: 'flower', exact: true })).toBeVisible();
+  // The sharer reloads: the file is no longer open there, so it's asked for again...
+  await page.reload();
+  await expect(page.getByText('Choose the file again to carry on.')).toBeVisible();
+  // ...and meanwhile the guest waits, or plays their own copy.
+  await expect(guest.getByText('Waiting for Advitiya’s device…')).toBeVisible({ timeout: 30_000 });
+  await guest.getByLabel('Choose the file').setInputFiles(fixture);
+  await expect(guest.getByText('Waiting for Advitiya’s device…')).toHaveCount(0);
+  await expect
+    .poll(() =>
+      guest
+        .locator('.player-screen video')
+        .evaluate((el: HTMLVideoElement) => el.src.startsWith('blob:') && el.readyState >= 2),
+    )
+    .toBe(true);
   await context.close();
 });

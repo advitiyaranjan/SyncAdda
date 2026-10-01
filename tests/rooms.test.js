@@ -236,6 +236,22 @@ test('call signaling requires shared room membership and call participation', as
   await emit(guestClient.socket, 'call:status', { inCall: false, mic: true, camera: true });
   assert.equal(service.rooms.get(room.code).people.get(guestClient.identity.id).mic, false);
 });
+test('file streaming is set up between people in the same room, and media records who added it', async () => {
+  const { host, room, identity } = await setup();
+  const guestClient = await guest(room);
+  const stranger = await client();
+  await emit(host, 'media:add', { title: 'Holiday', url: 'local:holiday.mp4#1024', kind: 'video' });
+  assert.equal(service.rooms.get(room.code).playlist[0].by, identity.id);
+  const offer = { link: 'abc', role: 'viewer', description: { type: 'offer', sdp: 'v=0\r\n' } };
+  const signal = nextEvent(host, 'file:signal');
+  assert.equal(
+    (await emit(guestClient.socket, 'file:signal', { to: identity.id, ...offer })).ok,
+    true,
+  );
+  assert.deepEqual(await signal, { from: guestClient.identity.id, ...offer });
+  assert.equal((await emit(stranger, 'file:signal', { to: identity.id, ...offer })).ok, false);
+  assert.equal((await emit(host, 'file:signal', { to: identity.id, ...offer })).ok, false);
+});
 test('leaving transfers hosting, and the room stays open while anyone is in it', async () => {
   const { host, room } = await setup();
   const first = await guest(room);

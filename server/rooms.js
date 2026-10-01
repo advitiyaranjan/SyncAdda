@@ -20,12 +20,23 @@ const mediaSchema = z.object({
     .string()
     .url()
     .max(2048)
-    // A web link, or a file each person plays from their own device (its name and size).
+    // A web link, or a file played from the device of whoever added it (its name and size).
     .refine(
       (value) => /^https?:\/\//i.test(value) || /^local:[^#]+#\d+$/.test(value),
       'Use an http or https media URL.',
     ),
   kind: z.enum(['video', 'audio']),
+});
+// Sets up the peer-to-peer connection that streams such a file to someone watching. `role` is
+// the sender's end of it, and `link` tells one connection from the next between the same two.
+export const fileSignalSchema = z.object({
+  to: z.string().uuid(),
+  link: z.string().min(1).max(64),
+  role: z.enum(['viewer', 'source']),
+  description: z
+    .object({ type: z.enum(['offer', 'answer']), sdp: z.string().max(65536) })
+    .optional(),
+  candidate: z.record(z.unknown()).optional(),
 });
 /**
  * Whether a person may do something that needs 'host', 'control' (playback and queue order) or 'add'
@@ -55,7 +66,13 @@ export const positionAt = (playback, now = Date.now()) =>
   (playback.playing ? (Math.max(0, now - playback.updatedAt) / 1000) * playback.rate : 0);
 export function attachRooms(
   io,
-  { graceMs = 90_000, callGraceMs = 15_000, emptyMs = EMPTY_MS } = {},
+  {
+    graceMs = 90_000,
+    callGraceMs = 15_000,
+    emptyMs = EMPTY_MS,
+    // Rooms one address may create in a minute. The browser tests create more than that.
+    createLimit = Number(process.env.ROOM_CREATE_LIMIT) || 12,
+  } = {},
 ) {
   const rooms = new Map();
   const timers = new Set();
@@ -128,8 +145,8 @@ export function attachRooms(
             count = 0;
             signals = 0;
           }
-          // Call setup sends a burst of ICE candidates per peer, so it gets its own budget.
-          if (name === 'call:signal' ? ++signals > 800 : ++count > 140)
+          // Connection setup sends a burst of ICE candidates per peer, so it gets its own budget.
+          if (name.endsWith(':signal') ? ++signals > 800 : ++count > 140)
             throw new Error('A little too fast. Please try again in a moment.');
           const result = await handler(data);
           reply({ ok: true, ...result });
@@ -202,7 +219,7 @@ export function attachRooms(
         limit.count = 0;
         limit.at = Date.now();
       }
-      if (++limit.count > 12 || rooms.size >= 1000)
+      if (++limit.count > createLimit || rooms.size >= 1000)
         throw new Error('Please wait a minute before creating another room.');
       creationLimits.set(address, limit);
       let code;
@@ -312,7 +329,7 @@ export function attachRooms(
     event('media:add', (data) => {
       const room = current('add');
       if (room.playlist.length >= 40) throw new Error('Your queue is full. Remove an item first.');
-      const media = { ...mediaSchema.parse(data), id: randomUUID() };
+      const media = { ...mediaSchema.parse(data), id: randomUUID(), by: socket.data.personId };
       room.playlist.push(media);
       if (!room.currentId) {
         room.currentId = media.id;
@@ -397,6 +414,14 @@ export function attachRooms(
         description: input.description,
         candidate: input.candidate,
       });
+    });
+    event('file:signal', (data) => {
+      const room = current();
+      const { to, ...signal } = fileSignalSchema.parse(data);
+      const target = room.people.get(to);
+      if (!target?.online || to === socket.data.personId)
+        throw new Error('That person isn’t here right now.');
+      io.to(target.socketId).emit('file:signal', { from: socket.data.personId, ...signal });
     });
     event('clock:ping', () => ({ serverTime: Date.now() }));
     socket.on('disconnect', () => {

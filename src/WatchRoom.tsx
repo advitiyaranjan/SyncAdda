@@ -45,6 +45,7 @@ import PersonTile from './PersonTile';
 import { useCall } from './useCall';
 import { useWakeLock } from './useWakeLock';
 import { youtubeId, youtubeTitle } from './youtube';
+import { embedFor } from './embeds';
 import { checkFile, fileKind, fileTitle, uploadMedia } from './uploads';
 import { chooseLocal, localUrl } from './localFiles';
 
@@ -86,6 +87,8 @@ export default function WatchRoom({
   const [expandCall, setExpandCall] = useState(false);
   const [reactions, setReactions] = useState<{ id: string; emoji: string; name: string }[]>([]);
   const isYouTubeLink = !!youtubeId(mediaUrl.trim());
+  // Plays in a site's own embedded player (YouTube, Vimeo, Facebook, Twitch).
+  const isEmbedLink = isYouTubeLink || !!embedFor(mediaUrl.trim());
   useEffect(() => {
     const url = mediaUrl.trim();
     if (!youtubeId(url)) return;
@@ -218,7 +221,7 @@ export default function WatchRoom({
       setProgress(null);
     }
   }
-  // Plays from this device without uploading; everyone else picks their own copy of the file.
+  // Plays from this device without uploading, and streams from it to everyone else as they watch.
   async function playLocal() {
     const kind = mediaFile && fileKind(mediaFile);
     if (!mediaFile || !kind || busy) return;
@@ -306,6 +309,7 @@ export default function WatchRoom({
           </div>
           <Player
             room={room}
+            meId={identity.id}
             isHost={isHost}
             canControl={canControl}
             canAdd={canAdd}
@@ -860,7 +864,7 @@ export default function WatchRoom({
                 void addMedia({
                   title: mediaTitle.trim(),
                   url: mediaUrl.trim(),
-                  kind: isYouTubeLink ? 'video' : mediaKind,
+                  kind: isEmbedLink ? 'video' : mediaKind,
                 });
               }}
             >
@@ -875,8 +879,8 @@ export default function WatchRoom({
                   required
                 />
                 <small>
-                  YouTube links, or direct MP4, WebM, MP3, or HLS (.m3u8) links. The source must
-                  allow playback in your browser.
+                  YouTube, Vimeo, Facebook, or Twitch links, or any direct video, audio, or HLS
+                  (.m3u8) link. The source must allow playback in your browser.
                 </small>
               </label>
               <label>
@@ -889,7 +893,7 @@ export default function WatchRoom({
                   maxLength={100}
                 />
               </label>
-              {!isYouTubeLink && (
+              {!isEmbedLink && (
                 <label>
                   Type
                   <select
@@ -904,7 +908,9 @@ export default function WatchRoom({
               <p className="source-note">
                 {isYouTubeLink
                   ? 'Plays in YouTube’s player for everyone. Videos whose owners block embedding won’t play here.'
-                  : 'Subscription streaming services aren’t supported. Everyone streams directly from the source.'}
+                  : isEmbedLink
+                    ? 'Plays in that site’s own player for everyone. Videos whose owners block embedding won’t play here.'
+                    : 'Subscription streaming services aren’t supported. Everyone streams directly from the source.'}
               </p>
               {formError && (
                 <p className="form-error" role="alert">
@@ -1032,8 +1038,8 @@ export default function WatchRoom({
                 />
               </label>
               <p className="source-note">
-                Nothing is uploaded: it plays straight from your device. Friends need the same file
-                on theirs; they’ll be asked to choose it, and it stays in sync for everyone.
+                No waiting for an upload: it starts right away and streams from your device to
+                everyone in the room as you watch, in sync. Keep this page open while it plays.
               </p>
               {formError && (
                 <p className="form-error" role="alert">
