@@ -1,6 +1,7 @@
-import { test, expect, type Page, type Route } from '@playwright/test';
+import { test, expect, firefox, type Page, type Route } from '@playwright/test';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 const fixture = path.resolve('tests/fixtures/flower.mp4');
 const mediaBytes = readFileSync(fixture);
 async function serveMedia(route: Route) {
@@ -263,54 +264,73 @@ test('the shared queue advances once at the end, plays a file from the device, a
   await expect(page.locator('.floating-reactions')).toContainText('Advitiya');
 });
 
-test('a file played without uploading streams to friends from the device it is on, in sync', async ({
-  page,
-  browser,
-}) => {
-  const requests: string[] = [];
-  page.on('request', (request) => requests.push(`${request.method()} ${request.url()}`));
-  const url = await createRoom(page);
-  const context = await browser.newContext();
-  const guest = await context.newPage();
-  await joinRoom(guest, url);
+// Optional mixed-engine coverage: SYNCADDA_STREAM_BROWSER=firefox (requires Firefox installed).
+const firefoxViewer = process.env.SYNCADDA_STREAM_BROWSER === 'firefox';
+for (const mobile of firefoxViewer ? [false] : [false, true]) {
+  test(`a file played without uploading streams in sync on ${firefoxViewer ? 'Firefox' : mobile ? 'mobile' : 'desktop'}`, async ({
+    page,
+    browser,
+  }) => {
+    const requests: string[] = [];
+    page.on('request', (request) => requests.push(`${request.method()} ${request.url()}`));
+    const url = await createRoom(page);
+    const viewerBrowser = firefoxViewer
+      ? await firefox.launch({ firefoxUserPrefs: { 'media.autoplay.default': 0 } })
+      : browser;
+    const context = await viewerBrowser.newContext(
+      mobile
+        ? { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }
+        : { permissions: [] },
+    );
+    try {
+      const guest = await context.newPage();
+      await joinRoom(guest, url);
 
-  await page.getByRole('button', { name: 'Choose something to watch' }).click();
-  await page.getByRole('button', { name: 'Play without uploading' }).click();
-  await page.getByLabel('Video or song').setInputFiles(fixture);
-  await page.getByRole('button', { name: 'Add to our queue' }).click();
-  await expect(page.getByRole('heading', { name: 'flower', exact: true })).toBeVisible();
+      await page.getByRole('button', { name: 'Choose something to watch' }).click();
+      await page.getByRole('button', { name: 'Play without uploading' }).click();
+      await page.getByLabel('Video or song').setInputFiles(fixture);
+      await page.getByRole('button', { name: 'Add to our queue' }).click();
+      await expect(page.getByRole('heading', { name: 'flower', exact: true })).toBeVisible();
 
-  // The guest isn't asked for the file: it arrives from the sharer's device.
-  const video = (p: Page) => p.locator('.player-screen video');
-  await expect
-    .poll(
-      () =>
-        video(guest).evaluate(
-          (el: HTMLVideoElement) => el.src.includes('/p2p/') && el.readyState >= 3,
-        ),
-      { timeout: 30_000 },
-    )
-    .toBe(true);
-  await expect(guest.getByText('on this device')).toHaveCount(0);
-  expect(await video(guest).evaluate((el: HTMLVideoElement) => el.duration)).toBeGreaterThan(4);
-  // Nothing was uploaded anywhere.
-  expect(requests.filter((r) => !r.startsWith('GET ') && !r.includes('/socket.io/'))).toEqual([]);
+      // The guest isn't asked for the file: it arrives from the sharer's device.
+      const video = (p: Page) => p.locator('.player-screen video');
+      await expect
+        .poll(
+          () =>
+            video(guest).evaluate(
+              (el: HTMLVideoElement) => el.src.includes('/p2p/') && el.readyState >= 3,
+            ),
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+      await expect(guest.getByText('on this device')).toHaveCount(0);
+      expect(await video(guest).evaluate((el: HTMLVideoElement) => el.duration)).toBeGreaterThan(4);
+      // Nothing was uploaded anywhere.
+      expect(requests.filter((r) => !r.startsWith('GET ') && !r.includes('/socket.io/'))).toEqual(
+        [],
+      );
 
-  await page.getByRole('slider', { name: 'Seek for everyone' }).fill('2');
-  await expect
-    .poll(() => video(guest).evaluate((el: HTMLVideoElement) => Math.abs(el.currentTime - 2) < 0.3))
-    .toBe(true);
-  await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
-  for (const p of [page, guest])
-    await expect
-      .poll(() => video(p).evaluate((el: HTMLVideoElement) => !el.paused && el.currentTime > 2))
-      .toBe(true);
-  const [mine, theirs] = await Promise.all(
-    [page, guest].map((p) => video(p).evaluate((el: HTMLVideoElement) => el.currentTime)),
-  );
-  expect(Math.abs(mine - theirs)).toBeLessThan(0.5);
-  await context.close();
-});
+      await page.getByRole('slider', { name: 'Seek for everyone' }).fill('2');
+      await expect
+        .poll(() =>
+          video(guest).evaluate((el: HTMLVideoElement) => Math.abs(el.currentTime - 2) < 0.3),
+        )
+        .toBe(true);
+      await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
+      for (const p of [page, guest])
+        await expect
+          .poll(() => video(p).evaluate((el: HTMLVideoElement) => !el.paused && el.currentTime > 2))
+          .toBe(true);
+      const [mine, theirs] = await Promise.all(
+        [page, guest].map((p) => video(p).evaluate((el: HTMLVideoElement) => el.currentTime)),
+      );
+      expect(Math.abs(mine - theirs)).toBeLessThan(0.5);
+    } finally {
+      await context.close();
+      if (firefoxViewer) await viewerBrowser.close();
+    }
+  });
+}
 
 test('when the sharer is away, someone with the same file can play their own copy', async ({
   page,
@@ -343,4 +363,168 @@ test('when the sharer is away, someone with the same file can play their own cop
     )
     .toBe(true);
   await context.close();
+});
+
+// A larger valid MP4 with a trailing free-space box exercises multiple read-ahead windows.
+test('peer file ranges remain byte-exact with latency, reconnection, cancellation, and backward seeks', async ({
+  page,
+  browser,
+}) => {
+  const payload = Buffer.alloc(8 * 1024 * 1024 + 8);
+  payload.writeUInt32BE(payload.length, 0);
+  payload.write('free', 4);
+  for (let i = 8; i < payload.length; i++) payload[i] = (i * 31 + (i >>> 8)) & 255;
+  const file = Buffer.concat([mediaBytes, payload]);
+  const url = await createRoom(page);
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  try {
+    // Add 120 ms to each request, without changing the real WebRTC response path.
+    await context.addInitScript(() => {
+      const createChannel = RTCPeerConnection.prototype.createDataChannel;
+      RTCPeerConnection.prototype.createDataChannel = function (...args) {
+        if (args[0] === 'file')
+          (window as unknown as { fileTestPeer: RTCPeerConnection }).fileTestPeer = this;
+        return createChannel.apply(this, args);
+      };
+      const send = RTCDataChannel.prototype.send;
+      RTCDataChannel.prototype.send = function (data: string) {
+        if (typeof data === 'string' && JSON.parse(data).start !== undefined) {
+          setTimeout(() => {
+            if (this.readyState === 'open') send.call(this, data);
+          }, 120);
+        } else send.call(this, data);
+      };
+    });
+    const guest = await context.newPage();
+    await joinRoom(guest, url);
+    await page.getByRole('button', { name: 'Choose something to watch' }).click();
+    await page.getByRole('button', { name: 'Play without uploading' }).click();
+    await page
+      .getByLabel('Video or song')
+      .setInputFiles({ name: 'large.mp4', mimeType: 'video/mp4', buffer: file });
+    await page.getByRole('button', { name: 'Add to our queue' }).click();
+    const video = guest.locator('.player-screen video');
+    await expect
+      .poll(() => video.evaluate((el: HTMLVideoElement) => el.readyState))
+      .toBeGreaterThanOrEqual(3);
+    const src = await video.getAttribute('src');
+    expect(src).toContain('/p2p/');
+    const ranges = [
+      `bytes=0-${file.length - 1}`,
+      'bytes=524281-1572877',
+      'bytes=-4097',
+      'bytes=0-1',
+      `bytes=${file.length}-`,
+    ];
+    for (const range of ranges) {
+      const result = await guest.evaluate(
+        async ({ src, range }) => {
+          const response = await fetch(src!, { headers: { Range: range } });
+          let data: ArrayBuffer;
+          if (range.startsWith('bytes=0-') && range !== 'bytes=0-1') {
+            const reader = response.body!.getReader();
+            const first = await reader.read();
+            // Force the real data channel to disappear after a partial block has arrived.
+            (window as unknown as { fileTestPeer: RTCPeerConnection }).fileTestPeer.close();
+            const pieces = [first.value!];
+            for (let part; !(part = await reader.read()).done;) pieces.push(part.value!);
+            const joined = new Uint8Array(
+              pieces.reduce((size, piece) => size + piece.byteLength, 0),
+            );
+            let at = 0;
+            for (const piece of pieces) {
+              joined.set(piece, at);
+              at += piece.byteLength;
+            }
+            data = joined.buffer;
+          } else data = await response.arrayBuffer();
+          const hash = await crypto.subtle.digest('SHA-256', data);
+          return {
+            status: response.status,
+            size: data.byteLength,
+            range: response.headers.get('content-range'),
+            hash: Array.from(new Uint8Array(hash), (b) => b.toString(16).padStart(2, '0')).join(''),
+          };
+        },
+        { src, range },
+      );
+      const [, from, to] = /^bytes=(\d*)-(\d*)$/.exec(range)!;
+      const start = from ? Number(from) : file.length - Number(to);
+      const end = from ? (to ? Number(to) + 1 : file.length) : file.length;
+      expect(result.status).toBe(start >= file.length ? 416 : 206);
+      expect(result.size).toBe(Math.max(0, end - start));
+      expect(result.hash).toBe(
+        createHash('sha256').update(file.subarray(start, end)).digest('hex'),
+      );
+      expect(result.range).toBe(
+        start >= file.length
+          ? `bytes */${file.length}`
+          : `bytes ${start}-${end - 1}/${file.length}`,
+      );
+    }
+    await guest.evaluate(async (src) => {
+      const abort = new AbortController();
+      const response = await fetch(src!, { signal: abort.signal });
+      await response.body!.getReader().read();
+      abort.abort();
+    }, src);
+    // A cancelled download must not prevent a subsequent player seek.
+    await page.getByRole('slider', { name: 'Seek for everyone' }).fill('3');
+    await expect
+      .poll(() => video.evaluate((el: HTMLVideoElement) => el.currentTime))
+      .toBeCloseTo(3, 0);
+  } finally {
+    await context.close();
+  }
+});
+
+test('stream clock corrections wait for buffered data but host seeks still apply', async ({
+  page,
+  browser,
+}) => {
+  const url = await createRoom(page);
+  const context = await browser.newContext();
+  try {
+    const guest = await context.newPage();
+    await joinRoom(guest, url);
+    await page.getByRole('button', { name: 'Choose something to watch' }).click();
+    await page.getByRole('button', { name: 'Play without uploading' }).click();
+    await page.getByLabel('Video or song').setInputFiles(fixture);
+    await page.getByRole('button', { name: 'Add to our queue' }).click();
+    const video = guest.locator('.player-screen video');
+    await expect
+      .poll(() => video.evaluate((el: HTMLVideoElement) => el.readyState))
+      .toBeGreaterThanOrEqual(3);
+    await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
+    await expect
+      .poll(() => video.evaluate((el: HTMLVideoElement) => el.currentTime))
+      .toBeGreaterThan(0.1);
+    // Model a decoder stalled at the start with no buffered destination to seek into.
+    await video.evaluate((el: HTMLVideoElement) => {
+      el.dataset.seeks = '[]';
+      Object.defineProperties(el, {
+        readyState: { configurable: true, get: () => 2 },
+        buffered: { configurable: true, get: () => ({ length: 0 }) },
+        currentTime: {
+          configurable: true,
+          get: () => 0,
+          set: (value) => {
+            el.dataset.seeks = JSON.stringify([...JSON.parse(el.dataset.seeks!), value]);
+          },
+        },
+      });
+    });
+    await page.waitForTimeout(3200);
+    expect(await video.getAttribute('data-seeks')).toBe('[]');
+    await page.getByRole('slider', { name: 'Seek for everyone' }).fill('2');
+    await expect
+      .poll(() => video.evaluate((el) => JSON.parse((el as HTMLElement).dataset.seeks!).length))
+      .toBe(1);
+  } finally {
+    await context.close();
+  }
 });

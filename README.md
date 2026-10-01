@@ -29,7 +29,7 @@ Open **http://localhost:5173**. Vite serves the frontend and proxies Socket.IO a
 
 Paste a **direct, publicly accessible** media URL, such as `.mp4`, `.webm`, `.mp3`, or `.m3u8`. Browser codec support still applies. For reliable seeking, file servers must support byte-range requests. HLS sources must allow cross-origin requests. Use HTTPS media on an HTTPS deployment.
 
-**Play without uploading:** a video or song of any size can be played straight from your device. Nothing is uploaded and nobody waits: it starts at once on the sharer's device and streams from there to everyone else as they watch, peer to peer over a WebRTC data channel (through the same ICE/TURN servers as calls), in sync. Each viewer's player fetches only the bytes it needs, via a small service worker (`public/stream-sw.js`), so seeking works. The sharer has to stay in the room with the page open; if they're away, viewers wait, or play their own copy of the same file. Streaming is limited by the sharer's upload speed, and needs HTTPS (or localhost). YouTube links play through YouTube's embedded player (videos that disallow embedding won't play). Vimeo, Facebook, and Twitch links play the same way through those sites' embedded players (`src/embeds.ts`); X and Instagram players can't be controlled from outside, so they can't be synced. DRM-protected sources and subscription streaming services are not supported.
+**Play without uploading:** a video or song of any size can be played straight from your device. Nothing is uploaded: it plays locally on the sharer's device and streams from there to everyone else after their initial playback buffer fills, peer to peer over a WebRTC data channel (through the same ICE/TURN servers as calls), in sync. Each viewer's player fetches the bytes it needs via a small service worker (`public/stream-sw.js`), with four block requests in flight and up to 4 MiB of read-ahead per active range. This hides network round trips without loading the whole file into memory. Seeking cancels old transfers; interrupted transfers resume from the last received byte. Clock corrections wait for a buffered destination so they do not repeatedly interrupt buffering. The sharer has to stay in the room with the page open; if they're away, viewers wait, or play their own copy of the same file. Streaming needs HTTPS (or localhost). The sharer's upload speed must cover the file bitrate for every viewer; this mode does not transcode or lower video quality. MP4 with H.264 video and AAC audio is a good choice for broad device compatibility. Configure TURN for viewers on restrictive networks. Mobile browsers may suspend sharing if the sharer locks the phone or backgrounds the page. YouTube links play through YouTube's embedded player (videos that disallow embedding won't play). Vimeo, Facebook, and Twitch links play the same way through those sites' embedded players (`src/embeds.ts`); X and Instagram players can't be controlled from outside, so they can't be synced. DRM-protected sources and subscription streaming services are not supported.
 
 **From your device:** a video or song up to 100 MB can be uploaded once to Vercel Blob (straight from the browser, never through the app server) and streamed to everyone in the room. Uploads are deleted when removed from the queue or when the room closes, and a daily cron (`/api/cleanup-uploads`) removes anything older than 24 hours left by rooms that expired. Uploads need `BLOB_READ_WRITE_TOKEN`, which Vercel provides when a Blob store is connected to the project.
 
@@ -90,6 +90,8 @@ SYNCADDA_URL=https://adda.advitiyaranjan.in SYNCADDA_LIVE_RECONNECT=1 \
 
 Uploads (`upload.spec.ts`) run when the server has `BLOB_READ_WRITE_TOKEN`, and YouTube playback (`youtube.spec.ts`) needs access to youtube.com.
 
+File-streaming regression tests also cover mobile Chromium emulation, delayed peer requests, byte-exact ranges across a forced reconnect, cancellation, and avoiding repeated seeks during buffering. Unit tests cover bounded read-ahead, out-of-order block completion, and partial-transfer recovery. For a Chromium sharer with a Firefox viewer, install Firefox with `npx playwright install firefox`, then run `npx playwright test tests/browser/app.spec.ts --grep "without uploading streams"` with `SYNCADDA_STREAM_BROWSER=firefox`.
+
 Real iOS/Android hardware, public-network TURN connectivity, and long-session synchronization should be validated in the intended hosting environment before a public launch.
 
 ## Project map
@@ -100,6 +102,7 @@ src/Landing.tsx         Home page
 src/WatchRoom.tsx       Room, chat, queue, participants, host controls
 src/Player.tsx          Shared media player and clock correction
 src/fileShare.ts        Peer-to-peer streaming of files played without uploading
+src/rangeReader.ts      Bounded read-ahead, byte ordering, and resumable range reads
 src/useCall.ts          WebRTC signaling, tracks, and call lifecycle
 src/PersonTile.tsx      Participant video/audio and speaking indicator
 server/rooms.js         Room state, validation, authorization, socket events

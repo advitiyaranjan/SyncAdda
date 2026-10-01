@@ -138,6 +138,9 @@ export default function Player({
   const [stream, setStream] = useState<{ id: string; src: string | null }>();
   // Undefined while it's being set up, and null where this browser can't stream from a friend.
   const streamSrc = !localSource && stream?.id === media?.id ? stream?.src : undefined;
+  const streamingRef = useRef(false);
+  streamingRef.current = !!streamSrc;
+  const appliedStreamTarget = useRef('');
   const unreachable = useSyncExternalStore(onStreamChange, () =>
     media ? streamWaiting(media.id) : false,
   );
@@ -227,17 +230,39 @@ export default function Player({
     let drift = targetTime - engine.time();
     // Correct large gaps, but let an outstanding startup or seek finish first. YouTube
     // needs a wider tolerance because each correction can rebuffer on a phone.
-    const settled = !engine.syncing?.() && Date.now() - lastSeek.current > 2500;
-    if (settled && Math.abs(drift) > (target.playing ? (engine.nudges ? 1 : 1.25) : 0.1)) {
+    const video = videoRef.current;
+    const streaming = streamingRef.current;
+    const targetKey = `${target.position}:${target.updatedAt}`;
+    const newStreamTarget = streaming && appliedStreamTarget.current !== targetKey;
+    // A host seek must still work while buffering. Ordinary clock corrections must wait
+    // until the destination is buffered, or they repeatedly discard the bytes arriving.
+    const bufferedTarget =
+      !!video &&
+      Array.from({ length: video.buffered.length }, (_, i) => i).some(
+        (i) =>
+          video.buffered.start(i) <= targetTime &&
+          video.buffered.end(i) >= Math.min(duration, targetTime + 2 * target.rate),
+      );
+    const streamSettled =
+      !streaming ||
+      newStreamTarget ||
+      (!!video && !video.seeking && video.readyState >= 3 && bufferedTarget);
+    const settled = !engine.syncing?.() && Date.now() - lastSeek.current > 2500 && streamSettled;
+    if (
+      (newStreamTarget || settled) &&
+      Math.abs(drift) >
+        (target.playing ? (streaming ? (newStreamTarget ? 1 : 3) : engine.nudges ? 1 : 1.25) : 0.1)
+    ) {
       lastSeek.current = Date.now();
       engine.seek(targetTime);
       drift = 0;
     }
+    if (streaming) appliedStreamTarget.current = targetKey;
     // Speed up or slow down slightly in proportion to the gap (closing it over about 3 seconds,
     // at most 8%), ignoring gaps under 25 ms. Browsers keep the pitch, so it isn't noticeable.
     // Corrections move in 1% steps, so phones aren't retuning the speed several times a second.
     const correction =
-      engine.nudges && target.playing && Math.abs(drift) > 0.025
+      engine.nudges && target.playing && (!streaming || streamSettled) && Math.abs(drift) > 0.025
         ? Math.round(Math.max(-0.08, Math.min(0.08, drift / 3)) * 100) / 100
         : 0;
     const rate = target.rate * (1 + correction);
@@ -393,6 +418,7 @@ export default function Player({
     setLoading(!!media);
     setQualities([]);
     lastSeek.current = 0;
+    appliedStreamTarget.current = '';
     playAttempt.current = null;
     engineRef.current = null;
     const host = youtubeRef.current;

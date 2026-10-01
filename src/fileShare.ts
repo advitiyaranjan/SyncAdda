@@ -7,10 +7,9 @@
 import { request, socket } from './lib';
 import { chosenFile, localFile } from './localFiles';
 import { nameType } from './uploads';
+import { BLOCK, createRangeReader } from './rangeReader';
 
-const PIECE = 32 * 1024; // one message on the data channel
-const BLOCK = 16 * PIECE; // what a viewer asks for at a time
-const AHEAD = 2 * BLOCK; // what a viewer holds beyond what its player has taken
+const PIECE = 16 * 1024 - 4; // Include the request header in the 16 KiB message budget.
 const STALL_MS = 8000;
 
 type Signal = {
@@ -30,6 +29,7 @@ type Upstream = Link & {
   opened: Promise<void>;
   pending: RTCIceCandidateInit[];
   reads: Map<number, Read>;
+  lastActivity: number;
   close(): void;
 };
 type Stream = {
@@ -73,6 +73,11 @@ const drained = (channel: RTCDataChannel) =>
     };
     channel.addEventListener('bufferedamountlow', done);
     channel.addEventListener('close', done);
+    if (
+      channel.readyState !== 'open' ||
+      channel.bufferedAmount <= channel.bufferedAmountLowThreshold
+    )
+      done();
   });
 function serve(link: Link, channel: RTCDataChannel) {
   channel.binaryType = 'arraybuffer';
@@ -88,7 +93,13 @@ function serve(link: Link, channel: RTCDataChannel) {
       // Each piece carries the number of the request it answers.
       for (let at = 0; at < bytes.length && active.has(id); at += PIECE) {
         // Only as fast as it goes out, so a slow connection doesn't fill this device's memory.
-        if (channel.bufferedAmount > 2 * BLOCK) await drained(channel);
+        while (
+          channel.readyState === 'open' &&
+          active.has(id) &&
+          channel.bufferedAmount > 2 * BLOCK
+        )
+          await drained(channel);
+        if (!active.has(id) || channel.readyState !== 'open') break;
         const piece = new Uint8Array(4 + Math.min(PIECE, bytes.length - at));
         new DataView(piece.buffer).setUint32(0, id);
         piece.set(bytes.subarray(at, at + PIECE), 4);
@@ -106,7 +117,10 @@ function serve(link: Link, channel: RTCDataChannel) {
     if (message.stop) active.delete(message.stop);
     else void send(message);
   };
-  channel.onclose = () => dropViewer(link);
+  channel.onclose = () => {
+    active.clear();
+    dropViewer(link);
+  };
 }
 async function fromViewer({ from, link: id, description, candidate }: Signal) {
   let link = viewers.get(id);
@@ -144,6 +158,7 @@ async function connect(peer: string): Promise<Upstream> {
   const id = crypto.randomUUID(),
     reads = new Map<number, Read>();
   let close = () => {};
+  let disconnected: ReturnType<typeof setTimeout> | undefined;
   const opened = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => close(), 20_000);
     channel.onopen = () => {
@@ -152,6 +167,7 @@ async function connect(peer: string): Promise<Upstream> {
     };
     close = () => {
       clearTimeout(timer);
+      clearTimeout(disconnected);
       if (!upstreams.delete(id)) return;
       pc.close();
       reject(new Error('The connection was lost.'));
@@ -160,18 +176,32 @@ async function connect(peer: string): Promise<Upstream> {
     };
   });
   opened.catch(() => {});
-  const link: Upstream = { id, peer, pc, channel, opened, pending: [], reads, close };
+  const link: Upstream = {
+    id,
+    peer,
+    pc,
+    channel,
+    opened,
+    pending: [],
+    reads,
+    close,
+    lastActivity: Date.now(),
+  };
   upstreams.set(id, link);
   channel.onclose = () => link.close();
   pc.onconnectionstatechange = () => {
-    // A new connection is quicker than waiting to see whether this one recovers.
-    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') link.close();
+    clearTimeout(disconnected);
+    if (pc.connectionState === 'failed') link.close();
+    // Brief Wi-Fi/mobile handovers can recover without discarding buffered transfers.
+    else if (pc.connectionState === 'disconnected')
+      disconnected = setTimeout(() => link.close(), STALL_MS);
   };
   pc.onicecandidate = (event) => {
     if (event.candidate)
       signal(link, 'viewer', { candidate: event.candidate.toJSON() }).catch(() => {});
   };
   channel.onmessage = ({ data }) => {
+    link.lastActivity = Date.now();
     if (typeof data !== 'string')
       return reads.get(new DataView(data).getUint32(0))?.piece(data.slice(4));
     const message = JSON.parse(data);
@@ -241,29 +271,48 @@ function readBlock(
   piece: (bytes: ArrayBuffer) => void,
 ) {
   const id = ++requests;
+  const started = Date.now();
+  let stalledOut: ReturnType<typeof setTimeout> | undefined;
+  let received = start;
   let stall: ReturnType<typeof setTimeout> | undefined,
     stop = () => {};
   // Nothing for a while: the sharer's device is asleep or out of reach. It carries on if it
   // comes back.
   const watch = () => {
     clearTimeout(stall);
-    stall = setTimeout(() => setWaiting(stream, true), STALL_MS);
+    clearTimeout(stalledOut);
+    // A queued block can wait behind another block on a slow link. Only reconnect when
+    // the entire connection stops delivering data, not while another request progresses.
+    const quietFor = () => Date.now() - Math.max(started, link.lastActivity);
+    stalledOut = setTimeout(() => {
+      if (quietFor() >= 20_000) link.close();
+      else watch();
+    }, 20_000);
+    stall = setTimeout(() => {
+      if (quietFor() >= STALL_MS) setWaiting(stream, true);
+    }, STALL_MS);
   };
   const done = new Promise<void>((resolve, reject) => {
     link.reads.set(id, {
       piece(bytes) {
         watch();
         setWaiting(stream, false);
+        received += bytes.byteLength;
+        if (received > end) return link.close();
         piece(bytes);
       },
-      end: (failed) => (failed ? reject(new Error('The file isn’t available.')) : resolve()),
+      end: (failed) =>
+        failed || received !== end ? reject(new Error('The file isn’t available.')) : resolve(),
     });
     stop = () => {
       if (link.reads.delete(id) && link.channel.readyState === 'open')
         link.channel.send(JSON.stringify({ stop: id }));
       resolve();
     };
-  }).finally(() => clearTimeout(stall));
+  }).finally(() => {
+    clearTimeout(stall);
+    clearTimeout(stalledOut);
+  });
   watch();
   try {
     const asked: BlockRequest = { id, url: stream.url, start, end };
@@ -278,63 +327,30 @@ function readBlock(
 }
 // One request from the player: bytes `start` up to `end`, handed over a piece at a time.
 function readRange(stream: Stream, start: number, end: number) {
-  const queue: ArrayBuffer[] = [];
-  let at = start,
-    queued = 0,
-    busy = false,
-    closed = false,
-    stop = () => {},
-    waiter: ((piece: ArrayBuffer | null) => void) | undefined;
-  const give = () => {
-    if (!waiter || (!closed && !queue.length && at < end)) return;
-    const piece = closed ? undefined : queue.shift();
-    if (piece) queued -= piece.byteLength;
-    waiter(piece ?? null);
-    waiter = undefined;
-  };
-  const fill = async () => {
-    if (busy || closed || at >= end || queued >= AHEAD) return;
-    busy = true;
+  const buffered = createRangeReader(start, end, async (from, to, piece, signal) => {
     try {
       const link = await upstream(stream);
-      if (!closed) {
-        const block = readBlock(link, stream, at, Math.min(end, at + BLOCK), (bytes) => {
-          at += bytes.byteLength;
-          queued += bytes.byteLength;
-          queue.push(bytes);
-          give();
-        });
-        stop = block.stop;
+      if (signal.aborted) return;
+      const block = readBlock(link, stream, from, to, piece);
+      signal.addEventListener('abort', block.stop, { once: true });
+      try {
         await block.done;
+      } finally {
+        signal.removeEventListener('abort', block.stop);
       }
-    } catch {
-      // The sharer is offline, reloading, or hasn't opened the file again yet: keep trying.
-      if (!closed) {
-        setWaiting(stream, true);
-        await sleep(1500);
-      }
+    } catch (error) {
+      if (!signal.aborted) setWaiting(stream, true);
+      throw error;
     }
-    stop = () => {};
-    busy = false;
-    give();
-    void fill();
-  };
+  });
   const reader = {
-    next: () =>
-      new Promise<ArrayBuffer | null>((resolve) => {
-        waiter = resolve;
-        give();
-        void fill();
-      }),
+    next: buffered.next,
     cancel() {
-      closed = true;
-      stop();
+      buffered.cancel();
       stream.readers.delete(reader);
-      give();
     },
   };
   stream.readers.add(reader);
-  void fill();
   return reader;
 }
 // A request from the player, passed on by the service worker: answer with the response's
@@ -343,7 +359,10 @@ function answer(event: MessageEvent) {
   if (event.data?.type !== 'p2p-range') return;
   const port = event.ports[0],
     stream = streams.get(String(event.data.path).split('/')[2]);
-  if (!stream) return port.postMessage(null);
+  if (!stream) {
+    port.postMessage(null);
+    return port.close();
+  }
   const { size } = stream;
   const range = /^bytes=(\d*)-(\d*)$/.exec(event.data.range || '');
   let start = 0,
@@ -369,10 +388,17 @@ function answer(event: MessageEvent) {
   });
   const reader = readRange(stream, start, Math.max(start, end));
   port.onmessage = async ({ data }) => {
-    if (!data) return reader.cancel();
+    if (!data) {
+      reader.cancel();
+      return port.close();
+    }
     const piece = await reader.next();
     if (piece) port.postMessage(piece, [piece]);
-    else port.postMessage(null);
+    else {
+      port.postMessage(null);
+      reader.cancel();
+      port.close();
+    }
   };
 }
 let worker: Promise<void> | undefined;

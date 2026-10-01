@@ -23,29 +23,67 @@ async function serve(event, path) {
   // The page streaming this file answers with the response's status and headers.
   const answer = await new Promise((resolve) => {
     let left = pages.length;
-    if (!left) resolve(null);
+    if (!left) return resolve(null);
+    const ports = [];
+    let settled = false;
+    const finish = (answer) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const port of ports) {
+        if (port === answer?.port) continue;
+        port.postMessage(false);
+        port.close();
+      }
+      resolve(answer);
+    };
+    const timer = setTimeout(() => finish(null), 10_000);
     for (const page of pages) {
       const { port1, port2 } = new MessageChannel();
+      ports.push(port1);
       port1.onmessage = ({ data }) => {
-        if (data) resolve({ head: data, port: port1 });
-        else if (!--left) resolve(null);
+        if (data) finish({ head: data, port: port1 });
+        else if (!--left) finish(null);
       };
       page.postMessage({ type: 'p2p-range', path, range }, [port2]);
     }
-    setTimeout(() => resolve(null), 10_000);
   });
   if (!answer) return new Response(null, { status: 404 });
   const { head, port } = answer;
+  let pending;
+  let finished = false;
+  const close = () => {
+    if (finished) return;
+    finished = true;
+    port.postMessage(false);
+    port.close();
+    event.request.signal.removeEventListener('abort', abort);
+    pending?.();
+  };
+  let bodyController;
+  const abort = () => {
+    close();
+    bodyController?.error(new Error('Media request cancelled.'));
+  };
+  event.request.signal.addEventListener('abort', abort, { once: true });
   return new Response(
     new ReadableStream({
+      start(controller) {
+        bodyController = controller;
+        if (event.request.signal.aborted) abort();
+      },
       // One piece per pull, so nothing piles up here once the player has buffered enough.
       pull: (controller) =>
         new Promise((resolve) => {
+          if (finished) return resolve();
+          pending = resolve;
           port.onmessage = ({ data }) => {
+            if (finished) return;
+            pending = undefined;
             if (data) controller.enqueue(new Uint8Array(data));
             else {
-              port.onmessage = null;
               controller.close();
+              close();
             }
             resolve();
           };
@@ -53,8 +91,7 @@ async function serve(event, path) {
         }),
       // The player gave up on this request (a seek, say): the page stops fetching for it.
       cancel() {
-        port.onmessage = null;
-        port.postMessage(false);
+        close();
       },
     }),
     head,
