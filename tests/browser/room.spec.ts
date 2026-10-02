@@ -196,6 +196,27 @@ test('the player fills the screen height, and fullscreen controls hide after 5 s
   await expect(shell).not.toHaveClass(/controls-hidden/);
 });
 
+test('after a refresh the video carries on from where the room was', async ({ page }) => {
+  await enter(page, 'Asha');
+  await addVideo(page, 'Carry on');
+  const video = page.locator('.player-screen video');
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.duration)).toBeGreaterThan(4);
+  await page.locator('.seek-bar').fill('3');
+  await page.waitForTimeout(500);
+  // The video is slow to load after the refresh, and play is pressed before it has.
+  await page.unroute('https://media.example.test/flower.mp4');
+  await page.route('https://media.example.test/flower.mp4', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    await serveMedia(route);
+  });
+  await page.reload();
+  await expect(page.getByText('Connected', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Play for everyone', exact: true }).last().click();
+  await expect
+    .poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime), { timeout: 15_000 })
+    .toBeGreaterThan(2.9);
+});
+
 test('where fullscreen is unavailable (iPhone) the player covers the window, and skips 5 seconds', async ({
   page,
 }) => {

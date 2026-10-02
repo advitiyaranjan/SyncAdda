@@ -89,6 +89,10 @@ export default function Player({
   const offset = useRef(room.serverTime - Date.now());
   const clockSamples = useRef<{ rtt: number; offset: number }[]>([]);
   const lastSeek = useRef(0);
+  // Whether this device's player has caught up with the room since it loaded. Until then, where
+  // it happens to be (the start, after a refresh) isn't anyone's choice and isn't shared.
+  const aligned = useRef(false);
+  const here = () => (aligned.current ? engineRef.current?.time() : undefined);
   const shownAt = useRef(0);
   const seekTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [currentTime, setCurrentTime] = useState(0);
@@ -215,6 +219,18 @@ export default function Player({
       (!recentJump && (paused || playing) && Math.abs(time - expected) > 1.5);
     if (!changed) return;
     if (!canControl) return apply();
+    // Not caught up yet: a play or pause is shared, but not this player's position.
+    if (!aligned.current) {
+      if (playing === target.playing) return apply();
+      state.current = {
+        ...target,
+        playing,
+        position: expected,
+        updatedAt: Date.now() + offset.current,
+      };
+      setPlayback(state.current);
+      return void update({ playing });
+    }
     // Take it on right away, so the sync loop doesn't undo it before the server confirms.
     state.current = { ...target, playing, position: time, updatedAt: Date.now() + offset.current };
     setPlayback(state.current);
@@ -234,6 +250,13 @@ export default function Player({
     if (Number.isFinite(duration)) targetTime = Math.min(targetTime, duration);
     else if (range) targetTime = Math.max(range[0], Math.min(targetTime, range[1]));
     let drift = targetTime - engine.time();
+    if (
+      !aligned.current &&
+      Math.abs(drift) < 1.5 &&
+      !engine.syncing?.() &&
+      (!target.playing || !engine.paused())
+    )
+      aligned.current = true;
     // Correct large gaps, but let an outstanding startup or seek finish first. YouTube
     // needs a wider tolerance because each correction can rebuffer on a phone.
     const video = videoRef.current;
@@ -424,6 +447,7 @@ export default function Player({
     setLoading(!!media);
     setQualities([]);
     lastSeek.current = 0;
+    aligned.current = false;
     appliedStreamTarget.current = '';
     playAttempt.current = null;
     engineRef.current = null;
@@ -555,6 +579,8 @@ export default function Player({
   // playing while the page is in the background.
   const updateRef = useRef(update);
   updateRef.current = update;
+  const hereRef = useRef(here);
+  hereRef.current = here;
   useEffect(() => {
     if (!('mediaSession' in navigator) || !media) return;
     const session = navigator.mediaSession;
@@ -565,9 +591,7 @@ export default function Player({
       artwork: [{ src: '/favicon.svg', sizes: 'any', type: 'image/svg+xml' }],
     });
     const control = (playing: boolean) =>
-      canControl
-        ? () => void updateRef.current({ playing, position: engineRef.current?.time() || 0 })
-        : null;
+      canControl ? () => void updateRef.current({ playing, position: hereRef.current() }) : null;
     // Pressing play there is a tap, which is what a phone wants before it lets a video it
     // paused in the background carry on: so start this device's player in it, too.
     const play = () => {
@@ -612,6 +636,7 @@ export default function Player({
   }
   function seek(value: number) {
     if (!canControl) return;
+    aligned.current = true;
     state.current = { ...state.current, position: value, updatedAt: Date.now() + offset.current };
     lastSeek.current = Date.now();
     engineRef.current?.seek(value);
@@ -626,7 +651,14 @@ export default function Player({
     const engine = engineRef.current;
     if (!engine) return;
     const range = engine.seekable();
-    let target = Math.max(0, engine.time() + seconds);
+    const shared = state.current;
+    const from =
+      here() ??
+      shared.position +
+        (shared.playing
+          ? (Math.max(0, Date.now() + offset.current - shared.updatedAt) / 1000) * shared.rate
+          : 0);
+    let target = Math.max(0, from + seconds);
     if (Number.isFinite(duration) && duration > 0) target = Math.min(target, duration);
     else if (range) target = Math.max(range[0], Math.min(target, range[1]));
     seek(target);
@@ -652,7 +684,7 @@ export default function Player({
       }
       return;
     }
-    await update({ playing: !playback.playing, position: engineRef.current?.time() || 0 });
+    await update({ playing: !playback.playing, position: here() });
   }
   async function next() {
     const index = room.playlist.findIndex((m) => m.id === room.currentId);
@@ -664,7 +696,7 @@ export default function Player({
       } catch (e) {
         notify((e as Error).message);
       }
-    } else await update({ playing: false, position: engineRef.current?.time() || 0 });
+    } else await update({ playing: false, position: here() });
   }
   // In fullscreen, the controls fade out after 5 seconds without a move, tap, or key press.
   const wakeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
