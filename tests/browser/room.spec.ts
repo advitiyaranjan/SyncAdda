@@ -247,6 +247,44 @@ test('where fullscreen is unavailable (iPhone) the player covers the window, and
   await expect(shell).not.toHaveClass(/is-pinned/);
 });
 
+test('a new message or a friend on the call pops up, with a way to open the chat or join', async ({
+  page,
+  browser,
+}) => {
+  await enter(page, 'Asha');
+  const guest = await (await browser.newContext()).newPage();
+  await enter(guest, 'Bina', page.url());
+  await page.getByRole('tab', { name: /Queue/ }).click();
+
+  await guest.getByRole('textbox', { name: 'Message your room' }).fill('Popcorn ready?');
+  await guest.getByRole('button', { name: 'Send message', exact: true }).click();
+  const notice = page.locator('.notice-chat');
+  await expect(notice).toContainText('Bina');
+  await expect(notice).toContainText('Popcorn ready?');
+  await expect(page.getByRole('tab', { name: /Chat/ })).toContainText('1');
+  await notice.locator('.notice-body').click();
+  await expect(page.getByRole('tab', { name: /Chat/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(notice).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: /Chat/ })).not.toContainText('1');
+  // With the chat open there's nothing to pop up.
+  await guest.getByRole('textbox', { name: 'Message your room' }).fill('Starting now');
+  await guest.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect(page.locator('.chat-panel').getByText('Starting now')).toBeVisible();
+  await expect(page.locator('.notice-chat')).toHaveCount(0);
+
+  await guest.getByRole('button', { name: 'Join call', exact: true }).click();
+  const callNotice = page.locator('.notice-call');
+  await expect(callNotice).toContainText('Bina joined the call');
+  await callNotice.getByRole('button', { name: 'Join', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Leave call', exact: true })).toBeVisible();
+  await expect(callNotice).toHaveCount(0);
+
+  // Someone arriving while a call is on hears about it.
+  const late = await (await browser.newContext()).newPage();
+  await enter(late, 'Chand', page.url());
+  await expect(late.locator('.notice-call')).toContainText('Asha and Bina are on the call');
+});
+
 test('chat fills its panel, the Video tab shows friends, and fullscreen has a see-through chat', async ({
   page,
   browser,

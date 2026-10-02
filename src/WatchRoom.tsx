@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ArrowRight,
   Copy,
@@ -41,6 +41,7 @@ import { colorFor, initials, request, socket } from './lib';
 import type { Identity, Room } from './types';
 import Player from './Player';
 import FullscreenChat from './FullscreenChat';
+import NoticeStack, { askNotifications, systemNotify, type Notice } from './Notices';
 import PersonTile from './PersonTile';
 import { useCall } from './useCall';
 import { useWakeLock } from './useWakeLock';
@@ -48,6 +49,15 @@ import { youtubeId, youtubeTitle } from './youtube';
 import { embedFor } from './embeds';
 import { checkFile, fileKind, fileTitle, uploadMedia } from './uploads';
 import { chooseLocal, localUrl } from './localFiles';
+
+// Phones and small tablets show one part of the room at a time (see the room's mobile nav).
+const narrowQuery = '(max-width: 900px)';
+const onNarrowChange = (change: () => void) => {
+  const query = window.matchMedia(narrowQuery);
+  query.addEventListener('change', change);
+  return () => query.removeEventListener('change', change);
+};
+const isNarrow = () => window.matchMedia(narrowQuery).matches;
 
 export default function WatchRoom({
   room,
@@ -109,6 +119,114 @@ export default function WatchRoom({
   }, [mediaUrl]);
   const chatEnd = useRef<HTMLDivElement>(null);
   const call = useCall(identity.id, room.participants, notify);
+  const joinCall = () => {
+    askNotifications();
+    void call.toggleMic();
+  };
+  const joinCallRef = useRef(joinCall);
+  joinCallRef.current = joinCall;
+  // Pop-ups for a new message while the chat is out of sight, and for friends on the call.
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const noticeTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const dismiss = useCallback((id: string) => {
+    clearTimeout(noticeTimers.current.get(id));
+    noticeTimers.current.delete(id);
+    setNotices((shown) => shown.filter((n) => n.id !== id));
+  }, []);
+  const pushNotice = useCallback(
+    (notice: Notice, ms: number) => {
+      setNotices((shown) => [...shown.filter((n) => n.id !== notice.id), notice].slice(-3));
+      clearTimeout(noticeTimers.current.get(notice.id));
+      noticeTimers.current.set(
+        notice.id,
+        setTimeout(() => dismiss(notice.id), ms),
+      );
+    },
+    [dismiss],
+  );
+  useEffect(() => {
+    const timers = noticeTimers.current;
+    return () => timers.forEach(clearTimeout);
+  }, []);
+  const narrow = useSyncExternalStore(onNarrowChange, isNarrow);
+  const [fullscreen, setFullscreen] = useState(false);
+  const chatVisible = !fullscreen && (narrow ? mobileView === 'chat' : panel === 'chat');
+  const chatVisibleRef = useRef(chatVisible);
+  chatVisibleRef.current = chatVisible;
+  const [unread, setUnread] = useState(0);
+  const openChat = useCallback(() => {
+    setPanel('chat');
+    setMobileView('chat');
+  }, []);
+  useEffect(() => {
+    if (!chatVisible) return;
+    setUnread(0);
+    setNotices((shown) => shown.filter((n) => n.kind !== 'chat'));
+  }, [chatVisible]);
+  const knownMessages = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const known = knownMessages.current;
+    knownMessages.current = new Set(room.messages.map((m) => m.id));
+    // The messages already there on arriving are history, not news.
+    if (!known) return;
+    const fresh = room.messages.filter(
+      (m) => !known.has(m.id) && !m.system && m.personId !== identity.id,
+    );
+    for (const message of fresh) {
+      systemNotify(message.name, message.text, 'syncadda-chat');
+      if (chatVisibleRef.current) continue;
+      setUnread((count) => count + 1);
+      pushNotice(
+        {
+          id: `chat-${message.id}`,
+          kind: 'chat',
+          title: message.name,
+          text: message.text,
+          open: openChat,
+        },
+        6000,
+      );
+    }
+  }, [room.messages, identity.id, pushNotice, openChat]);
+  const callerIds = room.participants
+    .filter((p) => p.inCall && p.online && p.id !== identity.id)
+    .map((p) => p.id)
+    .join();
+  const knownCallers = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const callers = room.participants.filter((p) => p.inCall && p.online && p.id !== identity.id);
+    const known = knownCallers.current;
+    knownCallers.current = new Set(callers.map((p) => p.id));
+    // On arriving, it's who is already on the call; after that, whoever joins it.
+    const joined = known ? callers.filter((p) => !known.has(p.id)) : callers;
+    if (!joined.length) return;
+    const names =
+      joined.length === 1
+        ? joined[0].name
+        : joined.length === 2
+          ? `${joined[0].name} and ${joined[1].name}`
+          : `${joined[0].name} and ${joined.length - 1} others`;
+    const title = known
+      ? `${names} joined the call`
+      : `${names} ${joined.length === 1 ? 'is' : 'are'} on the call`;
+    const text = call.inCall ? 'Say hello!' : 'Join to talk while you watch.';
+    systemNotify(title, text, 'syncadda-call');
+    pushNotice(
+      {
+        id: 'call',
+        kind: 'call',
+        title,
+        text,
+        action: call.inCall ? undefined : { label: 'Join', run: () => joinCallRef.current() },
+      },
+      9000,
+    );
+    // Only who is on the call matters here, not everything else about each person.
+  }, [callerIds]);
+  // Once they're on the call themselves, there's nothing to join.
+  useEffect(() => {
+    if (call.inCall) setNotices((shown) => shown.filter((n) => !n.action));
+  }, [call.inCall]);
   // Back was pressed: ask before leaving (the movie and the call keep going meanwhile).
   useEffect(() => {
     if (askLeave) setModal('leave');
@@ -148,6 +266,7 @@ export default function WatchRoom({
     }
   }
   async function sendText(text: string) {
+    askNotifications();
     try {
       await request('chat:send', { text });
       return true;
@@ -171,6 +290,7 @@ export default function WatchRoom({
   async function send(event: React.FormEvent) {
     event.preventDefault();
     if (!draft.trim() || sending) return;
+    askNotifications();
     setSending(true);
     try {
       await request('chat:send', { text: draft.trim() });
@@ -315,8 +435,11 @@ export default function WatchRoom({
             canAdd={canAdd}
             onAdd={add}
             notify={notify}
+            onFullscreen={setFullscreen}
             overlay={
               <FullscreenChat
+                notices={notices}
+                dismiss={dismiss}
                 messages={room.messages}
                 meId={identity.id}
                 connected={connected}
@@ -388,7 +511,7 @@ export default function WatchRoom({
               onClick={() => setPanel('chat')}
             >
               <MessageCircle size={16} />
-              Chat
+              Chat {unread > 0 && <small aria-label={`${unread} unread`}>{unread}</small>}
             </button>
             <button
               role="tab"
@@ -766,7 +889,7 @@ export default function WatchRoom({
           ) : (
             <button
               className="button call-join"
-              onClick={call.toggleMic}
+              onClick={joinCall}
               disabled={call.busy || !connected}
             >
               <Phone size={16} />
@@ -809,9 +932,15 @@ export default function WatchRoom({
           >
             <item.icon size={20} />
             {item.label}
+            {item.id === 'chat' && unread > 0 && (
+              <small className="nav-badge" aria-label={`${unread} unread`}>
+                {unread > 9 ? '9+' : unread}
+              </small>
+            )}
           </button>
         ))}
       </nav>
+      {!fullscreen && <NoticeStack notices={notices} dismiss={dismiss} />}
       <div className="floating-reactions" aria-live="polite">
         {reactions.map((reaction, index) => (
           <span key={reaction.id} style={{ left: `${15 + (index % 5) * 16}%` }}>

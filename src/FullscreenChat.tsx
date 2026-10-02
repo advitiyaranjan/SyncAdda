@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { MessageCircle, MessageCircleOff, Send } from 'lucide-react';
 import type { Message } from './types';
+import NoticeStack, { type Notice } from './Notices';
 
 const EMOJIS = ['❤️', '😂', '🔥', '👏', '🍿', '✨'];
 const load = () => {
@@ -19,6 +20,8 @@ export default function FullscreenChat({
   reactions,
   onSend,
   onReact,
+  notices,
+  dismiss,
 }: {
   messages: Message[];
   meId: string;
@@ -26,6 +29,8 @@ export default function FullscreenChat({
   reactions: { id: string; emoji: string; name: string }[];
   onSend: (text: string) => Promise<boolean>;
   onReact: (emoji: string) => void;
+  notices: Notice[];
+  dismiss: (id: string) => void;
 }) {
   const [open, setOpen] = useState(load);
   const [draft, setDraft] = useState('');
@@ -39,6 +44,11 @@ export default function FullscreenChat({
   };
   return (
     <div className="fs-overlay">
+      {/* New messages already show in the chat here, while it's open. */}
+      <NoticeStack
+        notices={open ? notices.filter((n) => n.kind !== 'chat') : notices}
+        dismiss={dismiss}
+      />
       <div className="fs-reactions" aria-live="polite">
         {reactions.map((reaction, index) => (
           <span key={reaction.id} style={{ left: `${30 + (index % 5) * 8}%` }}>

@@ -97,3 +97,14 @@ async function serve(event, path) {
     head,
   );
 }
+
+// Tapping a chat or call notification brings the room back.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((pages) => {
+      const page = pages.find((p) => 'focus' in p);
+      return page ? page.focus() : self.clients.openWindow('/');
+    }),
+  );
+});

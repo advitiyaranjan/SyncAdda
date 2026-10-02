@@ -70,6 +70,7 @@ export default function Player({
   onAdd,
   notify,
   overlay,
+  onFullscreen,
 }: {
   room: Room;
   meId: string;
@@ -80,6 +81,7 @@ export default function Player({
   notify: (message: string) => void;
   // Shown over the video in fullscreen (chat and reactions).
   overlay?: React.ReactNode;
+  onFullscreen?: (on: boolean) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const youtubeRef = useRef<HTMLDivElement>(null);
@@ -124,6 +126,7 @@ export default function Player({
   // iPhones can't put a page element in fullscreen, so the player covers the window instead.
   const [pinned, setPinned] = useState(false);
   const isFullscreen = nativeFullscreen || pinned;
+  useEffect(() => onFullscreen?.(isFullscreen), [isFullscreen, onFullscreen]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [playback, setPlayback] = useState(room.playback);

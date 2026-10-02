@@ -4572,3 +4572,129 @@ input[type='file']::file-selector-button {
 .embed-frame > div:not(.fb-video) {
   height: 100%;
 }
+
+/* Pop-ups for new messages and friends on the call (see Notices). */
+.notice-stack {
+  position: fixed;
+  top: 92px;
+  right: 18px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(340px, calc(100% - 32px));
+  pointer-events: none;
+}
+.fs-overlay .notice-stack {
+  position: absolute;
+  top: 14px;
+  right: auto;
+  left: 14px;
+}
+.notice {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 8px 8px 10px;
+  border-radius: 12px;
+  background: #1f2a1ceb;
+  border: 1px solid #3c5230;
+  color: #e7efdc;
+  box-shadow: 0 10px 30px #0006;
+  backdrop-filter: blur(8px);
+  animation: notice-in 0.25s ease-out;
+}
+.notice-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  color: inherit;
+}
+.notice-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #33462a;
+  color: #b7d199;
+}
+.notice-call .notice-icon {
+  background: #4a3a26;
+  color: #e8b083;
+}
+.notice-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.notice-text strong {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.notice-text span {
+  font-size: 12px;
+  color: #b4c3a5;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+.notice-action {
+  flex: none;
+}
+.notice-close {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #8fa27f;
+}
+.notice-close:hover {
+  background: #ffffff14;
+}
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+}
+.nav-badge {
+  position: absolute;
+  top: 7px;
+  margin-left: 22px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #dc986a;
+  color: #1c2618;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+@media (max-width: 900px) {
+  .notice-stack {
+    top: calc(10px + env(safe-area-inset-top));
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .notice {
+    animation: none;
+  }
+}
