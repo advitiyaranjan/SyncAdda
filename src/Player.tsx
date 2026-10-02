@@ -3,10 +3,13 @@ import {
   Film,
   LoaderCircle,
   Maximize2,
+  Minimize2,
   Music2,
   Pause,
   Play,
   Plus,
+  RotateCcw,
+  RotateCw,
   SkipForward,
   Volume2,
   VolumeX,
@@ -113,7 +116,10 @@ export default function Player({
     return () => document.removeEventListener('pointerdown', tapped);
   }, [silenced, setSilenced]);
   const [controlsHidden, setControlsHidden] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [nativeFullscreen, setNativeFullscreen] = useState(false);
+  // iPhones can't put a page element in fullscreen, so the player covers the window instead.
+  const [pinned, setPinned] = useState(false);
+  const isFullscreen = nativeFullscreen || pinned;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [playback, setPlayback] = useState(room.playback);
@@ -615,6 +621,16 @@ export default function Player({
       void update({ position: value });
     }, 100);
   }
+  // Jumps back or ahead a few seconds, for everyone.
+  function skip(seconds: number) {
+    const engine = engineRef.current;
+    if (!engine) return;
+    const range = engine.seekable();
+    let target = Math.max(0, engine.time() + seconds);
+    if (Number.isFinite(duration) && duration > 0) target = Math.min(target, duration);
+    else if (range) target = Math.max(range[0], Math.min(target, range[1]));
+    seek(target);
+  }
   async function toggle() {
     if (!media) return;
     if (blocked) {
@@ -652,26 +668,57 @@ export default function Player({
   }
   // In fullscreen, the controls fade out after 5 seconds without a move, tap, or key press.
   const wakeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pinnedRef = useRef(pinned);
+  pinnedRef.current = pinned;
   const wake = useCallback(() => {
-    setIsFullscreen(!!containerRef.current && document.fullscreenElement === containerRef.current);
+    const native =
+      !!containerRef.current &&
+      (document.fullscreenElement ?? document.webkitFullscreenElement) === containerRef.current;
+    setNativeFullscreen(native);
     setControlsHidden(false);
     clearTimeout(wakeTimer.current);
-    if (document.fullscreenElement && document.fullscreenElement === containerRef.current)
+    if (native || pinnedRef.current)
       wakeTimer.current = setTimeout(() => setControlsHidden(true), 5000);
   }, []);
   useEffect(() => {
     document.addEventListener('fullscreenchange', wake);
+    document.addEventListener('webkitfullscreenchange', wake);
     return () => {
       document.removeEventListener('fullscreenchange', wake);
+      document.removeEventListener('webkitfullscreenchange', wake);
       clearTimeout(wakeTimer.current);
     };
   }, [wake]);
+  useEffect(() => {
+    wake();
+    if (!pinned) return;
+    // Keep the page behind from scrolling, and let Escape leave as it does real fullscreen.
+    const overflow = document.documentElement.style.overflow;
+    document.documentElement.style.overflow = 'hidden';
+    const escape = (e: KeyboardEvent) => e.key === 'Escape' && setPinned(false);
+    document.addEventListener('keydown', escape);
+    return () => {
+      document.documentElement.style.overflow = overflow;
+      document.removeEventListener('keydown', escape);
+    };
+  }, [pinned, wake]);
   async function fullscreen() {
+    const el = containerRef.current;
+    if (!el) return;
+    if (pinned) return setPinned(false);
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
-      else await containerRef.current?.requestFullscreen();
+      else if (document.webkitFullscreenElement) await document.webkitExitFullscreen?.();
+      else if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) {
+        await el.webkitRequestFullscreen();
+        // Some phones accept the request without going fullscreen.
+        setTimeout(() => {
+          if (!document.fullscreenElement && !document.webkitFullscreenElement) setPinned(true);
+        }, 500);
+      } else setPinned(true);
     } catch {
-      notify('Fullscreen is unavailable in this browser.');
+      setPinned(true);
     }
   }
   const audio = media?.kind === 'audio' && !embedded;
@@ -680,7 +727,7 @@ export default function Player({
   };
   return (
     <div
-      className={`player-shell ${controlsHidden ? 'controls-hidden' : ''}`}
+      className={`player-shell ${controlsHidden ? 'controls-hidden' : ''} ${isFullscreen ? 'is-fullscreen' : ''} ${pinned ? 'is-pinned' : ''}`}
       ref={containerRef}
       onPointerMove={wake}
       onPointerDown={wake}
@@ -880,6 +927,24 @@ export default function Player({
             )}
           </button>
           <button
+            className="icon-button jump-control"
+            aria-label="Back 5 seconds"
+            onClick={() => skip(-5)}
+            disabled={!media || !canControl || !Number.isFinite(duration)}
+          >
+            <RotateCcw size={18} />
+            <span>5</span>
+          </button>
+          <button
+            className="icon-button jump-control"
+            aria-label="Forward 5 seconds"
+            onClick={() => skip(5)}
+            disabled={!media || !canControl || !Number.isFinite(duration)}
+          >
+            <RotateCw size={18} />
+            <span>5</span>
+          </button>
+          <button
             className="icon-button skip-control"
             aria-label="Next in queue"
             onClick={next}
@@ -949,8 +1014,12 @@ export default function Player({
               ))}
             </select>
           )}
-          <button className="icon-button" aria-label="Fullscreen" onClick={fullscreen}>
-            <Maximize2 size={19} />
+          <button
+            className="icon-button"
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+            onClick={fullscreen}
+          >
+            {isFullscreen ? <Minimize2 size={19} /> : <Maximize2 size={19} />}
           </button>
         </div>
       </div>

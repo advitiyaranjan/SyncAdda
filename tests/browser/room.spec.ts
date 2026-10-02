@@ -196,6 +196,36 @@ test('the player fills the screen height, and fullscreen controls hide after 5 s
   await expect(shell).not.toHaveClass(/controls-hidden/);
 });
 
+test('where fullscreen is unavailable (iPhone) the player covers the window, and skips 5 seconds', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    // @ts-expect-error iPhone Safari has no element fullscreen.
+    delete Element.prototype.requestFullscreen;
+    // @ts-expect-error
+    delete Element.prototype.webkitRequestFullscreen;
+  });
+  await enter(page, 'Asha');
+  await addVideo(page, 'Phone screen');
+  const video = page.locator('.player-screen video');
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.duration)).toBeGreaterThan(4);
+  await page.getByRole('button', { name: 'Forward 5 seconds' }).click();
+  await expect
+    .poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime))
+    .toBeGreaterThan(4);
+  await page.getByRole('button', { name: 'Back 5 seconds' }).click();
+  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => v.currentTime)).toBeLessThan(1);
+
+  await page.getByRole('button', { name: 'Fullscreen' }).click();
+  const shell = page.locator('.player-shell');
+  await expect(shell).toHaveClass(/is-pinned/);
+  const box = (await shell.boundingBox())!;
+  expect(box).toMatchObject({ x: 0, y: 0, width: 1440, height: 1024 });
+  await expect(page.locator('.fs-chat')).toBeVisible();
+  await page.getByRole('button', { name: 'Exit fullscreen' }).click();
+  await expect(shell).not.toHaveClass(/is-pinned/);
+});
+
 test('chat fills its panel, the Video tab shows friends, and fullscreen has a see-through chat', async ({
   page,
   browser,

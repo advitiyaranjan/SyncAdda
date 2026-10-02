@@ -1727,19 +1727,19 @@ html[data-theme='dark'] {
   z-index: 3;
   white-space: nowrap;
 }
-.player-shell:fullscreen {
+.player-shell.is-fullscreen {
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 100%;
   border-radius: 0;
 }
-.player-shell:fullscreen .player-screen {
+.player-shell.is-fullscreen .player-screen {
   flex: 1;
   aspect-ratio: auto;
 }
 /* In fullscreen the controls float over the video and fade out when idle (see Player). */
-.player-shell:fullscreen .player-controls {
+.player-shell.is-fullscreen .player-controls {
   position: absolute;
   left: 0;
   right: 0;
@@ -1760,6 +1760,30 @@ html[data-theme='dark'] {
 .player-shell.controls-hidden {
   cursor: none;
 }
+/* Where the browser can't go fullscreen (iPhone), the player covers the whole window. */
+.player-shell.is-pinned {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  height: 100dvh;
+  border: 0;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+.player-shell.is-pinned .player-controls {
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+.jump-control {
+  position: relative;
+}
+.jump-control > span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 7px;
+  font-weight: 700;
+  pointer-events: none;
+}
 .controls-wake {
   position: absolute;
   left: 0;
@@ -1773,7 +1797,7 @@ html[data-theme='dark'] {
   .player-screen {
     min-height: min(calc(100dvh - 300px), 820px);
   }
-  .player-shell:fullscreen .player-screen {
+  .player-shell.is-fullscreen .player-screen {
     min-height: 0;
   }
 }
@@ -4254,7 +4278,7 @@ input[type='file']::file-selector-button {
   .room-small-note {
     font-size: 9px;
   }
-  .player-shell:fullscreen .player-screen {
+  .player-shell.is-fullscreen .player-screen {
     height: auto;
     max-height: none;
   }
